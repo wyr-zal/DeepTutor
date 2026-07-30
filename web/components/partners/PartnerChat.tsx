@@ -306,7 +306,9 @@ export default function PartnerChat({
     }
 
     attachedRef.current = false;
-    const ws = new WebSocket(wsUrl(`/api/v1/partners/${partnerId}/ws`));
+    const ws = new WebSocket(
+      wsUrl(`/api/v1/partners/${encodeURIComponent(partnerId)}/ws`),
+    );
     wsRef.current = ws;
     ws.onopen = () => {
       setConnected(true);

@@ -54,7 +54,14 @@ function PartnerDetail() {
   const searchParams = useSearchParams();
   const router = useRouter();
   const { t } = useTranslation();
-  const partnerId = params.partnerId;
+  const rawPartnerId = params.partnerId;
+  const partnerId = useMemo(() => {
+    try {
+      return decodeURIComponent(rawPartnerId);
+    } catch {
+      return rawPartnerId;
+    }
+  }, [rawPartnerId]);
 
   const initialTab = (searchParams.get("tab") as Tab) || "chat";
   const [tab, setTab] = useState<Tab>(

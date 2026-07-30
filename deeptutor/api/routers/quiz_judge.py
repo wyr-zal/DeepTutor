@@ -195,6 +195,24 @@ def _guess_image_mime(filename: str | None) -> str:
 
 @router.websocket("/question/judge")
 async def websocket_quiz_judge(websocket: WebSocket):
+    """Authenticate the socket and guarantee request-local context cleanup."""
+    from deeptutor.api.routers.auth import ws_auth_failed, ws_require_auth
+    from deeptutor.multi_user.context import reset_current_user
+
+    user_token = await ws_require_auth(websocket)
+    if user_token is ws_auth_failed:
+        return
+    try:
+        await _run_websocket_quiz_judge(websocket)
+    finally:
+        if user_token is not None:
+            try:
+                reset_current_user(user_token)
+            except Exception:
+                logger.debug("Could not reset AI judge user context", exc_info=True)
+
+
+async def _run_websocket_quiz_judge(websocket: WebSocket):
     """Stream an AI judgment for a single quiz answer.
 
     Auth is enforced via ``ws_require_auth`` rather than a router-level
@@ -227,13 +245,6 @@ async def websocket_quiz_judge(websocket: WebSocket):
         {"type": "done"}
         {"type": "error", "content": "..."}
     """
-    from deeptutor.api.routers.auth import ws_auth_failed, ws_require_auth
-    from deeptutor.multi_user.context import reset_current_user
-
-    user_token = await ws_require_auth(websocket)
-    if user_token is ws_auth_failed:
-        return
-
     await websocket.accept()
 
     async def safe_send(payload: dict[str, Any]) -> bool:
@@ -253,11 +264,6 @@ async def websocket_quiz_judge(websocket: WebSocket):
             await websocket.close()
         except Exception:
             pass
-        if user_token is not None:
-            try:
-                reset_current_user(user_token)
-            except Exception:
-                pass
         return
 
     question_text = (data.get("question") or "").strip()
@@ -267,11 +273,6 @@ async def websocket_quiz_judge(websocket: WebSocket):
             await websocket.close()
         except Exception:
             pass
-        if user_token is not None:
-            try:
-                reset_current_user(user_token)
-            except Exception:
-                pass
         return
 
     requested_language = (data.get("language") or "").strip().lower()
@@ -359,14 +360,10 @@ async def websocket_quiz_judge(websocket: WebSocket):
             await websocket.close()
         except Exception:
             pass
-        if user_token is not None:
-            try:
-                reset_current_user(user_token)
-            except Exception:
-                pass
         return
 
-    await safe_send({"type": "started"})
+    if not await safe_send({"type": "started"}):
+        return
 
     # Build a multimodal user message when ≥1 image was attached. We pass
     # the full ``messages`` array to ``factory.stream`` so it forwards the
@@ -420,8 +417,3 @@ async def websocket_quiz_judge(websocket: WebSocket):
             await websocket.close()
         except Exception:
             pass
-        if user_token is not None:
-            try:
-                reset_current_user(user_token)
-            except Exception:
-                pass

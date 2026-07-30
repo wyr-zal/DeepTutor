@@ -318,6 +318,7 @@ from deeptutor.api.routers import (
     mastery_path,
     mcp_settings,
     memory,
+    mobile,
     notebook,
     partners,
     personas,
@@ -359,9 +360,11 @@ app.include_router(
 )
 
 app.include_router(chat.router, prefix="/api/v1", tags=["chat"], dependencies=_auth)
-app.include_router(
-    question.router, prefix="/api/v1/question", tags=["question"], dependencies=_auth
-)
+# The question router currently contains WebSocket routes only. Each handler
+# authenticates before ``accept()`` through ``ws_require_auth``, which supports
+# the native-client ``?token=`` contract. Applying the HTTP-only dependency at
+# router mount time would reject a valid query token before the handler runs.
+app.include_router(question.router, prefix="/api/v1/question", tags=["question"])
 app.include_router(
     knowledge.router, prefix="/api/v1/knowledge", tags=["knowledge"], dependencies=_auth
 )
@@ -392,6 +395,7 @@ app.include_router(
 app.include_router(
     sessions.router, prefix="/api/v1/sessions", tags=["sessions"], dependencies=_auth
 )
+app.include_router(mobile.router, prefix="/api/v1/mobile", tags=["mobile"], dependencies=_auth)
 app.include_router(
     question_notebook.router,
     prefix="/api/v1/question-notebook",

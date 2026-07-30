@@ -280,6 +280,28 @@ def test_emit_quiz_question_structures_metadata() -> None:
     # qa_pair is the structured payload the frontend reads to render the card
     assert meta["qa_pair"]["question_id"] == "q_2"
     assert meta["qa_pair"]["question_type"] == "written"
+    assert meta["qa_metadata"] == {}
+
+
+def test_payload_with_unrepaired_issues_is_marked_failed() -> None:
+    pipeline = _make_pipeline()
+    template = QuizTemplate(
+        question_id="q_bad",
+        topic="algebra",
+        question_type="written",
+        difficulty="medium",
+    )
+
+    qa_pair = pipeline._payload_to_qa_pair(
+        template,
+        {"question": "", "correct_answer": "", "explanation": ""},
+        issues=["missing_question"],
+    )
+
+    assert qa_pair.metadata == {
+        "issues": ["missing_question"],
+        "error": "quiz_payload_validation_failed",
+    }
 
 
 # ---------------------------------------------------------------------------

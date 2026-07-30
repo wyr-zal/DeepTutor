@@ -32,6 +32,89 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
+_VALID_QUESTION_TYPES = frozenset(
+    {"choice", "concept", "fill_in_blank", "short_answer", "written", "coding"}
+)
+_MAX_QUESTION_COUNT = 50
+
+
+def _legacy_generate_args(requirement, count) -> dict:
+    """Translate the old ``/generate`` payload to the coordinator contract."""
+    if isinstance(count, bool):
+        raise ValueError("count must be an integer between 1 and 50")
+    try:
+        normalized_count = int(count)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("count must be an integer between 1 and 50") from exc
+    if normalized_count < 1 or normalized_count > _MAX_QUESTION_COUNT:
+        raise ValueError("count must be an integer between 1 and 50")
+    if isinstance(count, float) and not count.is_integer():
+        raise ValueError("count must be an integer between 1 and 50")
+
+    if isinstance(requirement, dict):
+        user_topic = str(requirement.get("knowledge_point") or "").strip()
+        preference = str(requirement.get("preference") or "").strip()
+        difficulty = str(requirement.get("difficulty") or "").strip().lower()
+        raw_question_type = requirement.get("question_type")
+    else:
+        user_topic = str(requirement or "").strip()
+        preference = ""
+        difficulty = ""
+        raw_question_type = ""
+
+    if preference:
+        preference_context = f"Additional question requirements: {preference}"
+        user_topic = "\n\n".join(part for part in (user_topic, preference_context) if part)
+
+    if difficulty == "auto":
+        difficulty = ""
+
+    if raw_question_type is None:
+        question_type = ""
+    elif not isinstance(raw_question_type, str):
+        raise ValueError("question_type must be a string")
+    else:
+        question_type = raw_question_type.strip().lower()
+    if question_type == "auto":
+        question_type = ""
+    if question_type and question_type not in _VALID_QUESTION_TYPES:
+        valid_types = ", ".join(sorted(_VALID_QUESTION_TYPES))
+        raise ValueError(
+            f"Unsupported question_type: {question_type}. Expected one of: {valid_types}"
+        )
+
+    question_types = [question_type] if question_type else []
+    per_type_counts = {question_type: normalized_count} if question_type else {}
+    return {
+        "user_topic": user_topic,
+        "num_questions": normalized_count,
+        "difficulty": difficulty,
+        "question_types": question_types,
+        "per_type_counts": per_type_counts,
+    }
+
+
+def _legacy_question_event(data: dict) -> dict:
+    """Expose new per-question stream events through the old WS envelope."""
+    metadata = data.get("metadata")
+    if not isinstance(metadata, dict):
+        return data
+    qa_pair = metadata.get("qa_pair")
+    if not isinstance(qa_pair, dict):
+        return data
+
+    qa_metadata = metadata.get("qa_metadata")
+    if not isinstance(qa_metadata, dict):
+        qa_metadata = qa_pair.get("metadata")
+    failed = isinstance(qa_metadata, dict) and bool(qa_metadata.get("error"))
+    return {
+        "type": "question",
+        "question_id": qa_pair.get("question_id", ""),
+        "index": metadata.get("question_index", 0),
+        "question": qa_pair,
+        "success": not failed,
+    }
+
 
 def _mimic_output_dir():
     # Resolved per-call so a per-user PathService (set after auth) routes
@@ -378,6 +461,15 @@ async def websocket_question_generate(websocket: WebSocket):
                 pass
             return
 
+        try:
+            generate_args = _legacy_generate_args(requirement, count)
+        except ValueError as exc:
+            try:
+                await websocket.send_json({"type": "error", "content": str(exc)})
+            except (RuntimeError, WebSocketDisconnect):
+                pass
+            return
+
         # Generate task ID
         task_key = f"question_{kb_name}_{hash(str(requirement))}"
         task_id = task_manager.generate_task_id("question_gen", task_key)
@@ -389,9 +481,7 @@ async def websocket_question_generate(websocket: WebSocket):
             logger.debug("WebSocket closed, cannot send task_id")
             return
 
-        logger.info(
-            f"[{task_id}] Starting question generation: {requirement.get('knowledge_point', 'Unknown')}"
-        )
+        logger.info(f"[{task_id}] Starting question generation: {generate_args['user_topic']}")
 
         # 2. Initialize Coordinator
         path_service = get_path_service()
@@ -426,7 +516,7 @@ async def websocket_question_generate(websocket: WebSocket):
         # WebSocket callback for coordinator to send structured updates
         async def ws_callback(data: dict):
             try:
-                await log_queue.put(data)
+                await log_queue.put(_legacy_question_event(data))
             except Exception:
                 pass
 
@@ -434,13 +524,18 @@ async def websocket_question_generate(websocket: WebSocket):
 
         # 4. Define background pusher for logs
         async def log_pusher():
+            send_failed = False
             while True:
                 entry = await log_queue.get()
                 try:
-                    await websocket.send_json(entry)
+                    if not send_failed:
+                        await websocket.send_json(entry)
                 except Exception:
-                    break
-                log_queue.task_done()
+                    # Keep draining so a closed socket cannot strand
+                    # ``log_queue.join()`` while generation winds down.
+                    send_failed = True
+                finally:
+                    log_queue.task_done()
 
         pusher_task = asyncio.create_task(log_pusher())
 
@@ -454,42 +549,23 @@ async def websocket_question_generate(websocket: WebSocket):
                         logger.debug("WebSocket closed, stopping question generation")
                         return
 
-                    # Extract fields from requirement dict
-                    user_topic = (
-                        requirement.get("knowledge_point", "")
-                        if isinstance(requirement, dict)
-                        else str(requirement)
-                    )
-                    preference = (
-                        requirement.get("preference", "") if isinstance(requirement, dict) else ""
-                    )
-                    difficulty = (
-                        requirement.get("difficulty", "") if isinstance(requirement, dict) else ""
-                    )
-                    question_type = (
-                        requirement.get("question_type", "")
-                        if isinstance(requirement, dict)
-                        else ""
-                    )
-
                     logger.info(
-                        f"Starting question generation for {count} question(s), topic: {user_topic}"
+                        "Starting question generation for %s question(s), topic: %s",
+                        generate_args["num_questions"],
+                        generate_args["user_topic"],
                     )
 
-                    batch_result = await coordinator.generate_from_topic(
-                        user_topic=user_topic,
-                        preference=preference,
-                        num_questions=count,
-                        difficulty=difficulty,
-                        question_type=question_type,
-                    )
+                    batch_result = await coordinator.generate_from_topic(**generate_args)
+
+                    # Keep incremental questions ahead of the terminal summary.
+                    await log_queue.join()
 
                     # Send batch summary
                     try:
                         await websocket.send_json(
                             {
                                 "type": "batch_summary",
-                                "requested": count,
+                                "requested": generate_args["num_questions"],
                                 "completed": batch_result.get("completed", 0),
                                 "failed": batch_result.get("failed", 0),
                             }

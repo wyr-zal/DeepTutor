@@ -69,7 +69,9 @@ export default function PartnerChannels({
     try {
       // Edit form needs raw secrets to populate fields. Default GET masks them.
       const res = await apiFetch(
-        apiUrl(`/api/v1/partners/${partnerId}?include_secrets=true`),
+        apiUrl(
+          `/api/v1/partners/${encodeURIComponent(partnerId)}?include_secrets=true`,
+        ),
       );
       if (!res.ok) return;
       const data = await res.json();
@@ -122,11 +124,16 @@ export default function PartnerChannels({
   const save = async () => {
     setSaving(true);
     try {
-      const res = await apiFetch(apiUrl(`/api/v1/partners/${partnerId}`), {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ channels: stripLegacyGlobalDelivery(channels) }),
-      });
+      const res = await apiFetch(
+        apiUrl(`/api/v1/partners/${encodeURIComponent(partnerId)}`),
+        {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            channels: stripLegacyGlobalDelivery(channels),
+          }),
+        },
+      );
       if (res.ok) {
         onToast(t("Channels saved"));
         await loadDetail();

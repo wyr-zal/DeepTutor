@@ -1,0 +1,6 @@
+# Copy this file to key.properties (which is gitignored) and keep the keystore
+# outside version control. Paths may be absolute or relative to android/.
+storeFile=/absolute/path/to/deeptutor-release.jks
+storePassword=replace-me
+keyAlias=deeptutor
+keyPassword=replace-me

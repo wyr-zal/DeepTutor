@@ -65,7 +65,7 @@ export default function PartnersPage() {
   const openPartner = useCallback(
     async (partner: PartnerInfo) => {
       if (isAdmin) {
-        router.push(`/partners/${partner.partner_id}`);
+        router.push(`/partners/${encodeURIComponent(partner.partner_id)}`);
         return;
       }
       setBusyId(partner.partner_id);

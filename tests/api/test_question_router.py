@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import importlib
 from pathlib import Path
 import sys
+import time
 import types
 
 import pytest
@@ -97,10 +98,29 @@ def _build_app(router_module) -> FastAPI:
     return app
 
 
+def _install_ws_auth_stubs(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_auth = types.ModuleType("deeptutor.api.routers.auth")
+    fake_auth.ws_auth_failed = object()
+
+    async def _ws_require_auth(_websocket):
+        return object()
+
+    fake_auth.ws_require_auth = _ws_require_auth
+    monkeypatch.setitem(sys.modules, "deeptutor.api.routers.auth", fake_auth)
+
+    fake_multi_user = _package("deeptutor.multi_user")
+    fake_context = types.ModuleType("deeptutor.multi_user.context")
+    fake_context.reset_current_user = lambda _token: None
+    fake_multi_user.context = fake_context
+    monkeypatch.setitem(sys.modules, "deeptutor.multi_user", fake_multi_user)
+    monkeypatch.setitem(sys.modules, "deeptutor.multi_user.context", fake_context)
+
+
 def test_mimic_websocket_accepts_config_and_returns_messages(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     question_router_module = _load_question_router_module(monkeypatch)
+    _install_ws_auth_stubs(monkeypatch)
 
     async def _fake_mimic_exam_questions(*_args, **_kwargs):
         return {"success": False, "error": "stub mimic failure"}
@@ -129,3 +149,164 @@ def test_mimic_websocket_accepts_config_and_returns_messages(
     assert messages[0]["stage"] == "init"
     assert messages[1]["stage"] == "processing"
     assert messages[2]["content"] == "stub mimic failure"
+
+
+def test_generate_websocket_adapts_legacy_payload_and_streams_question(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    question_router_module = _load_question_router_module(monkeypatch)
+    _install_ws_auth_stubs(monkeypatch)
+    calls: list[dict] = []
+
+    class _FakeCoordinator:
+        def __init__(self, **_kwargs) -> None:
+            self.callback = None
+
+        def set_ws_callback(self, callback) -> None:
+            self.callback = callback
+
+        async def generate_from_topic(self, **kwargs):
+            calls.append(kwargs)
+            assert self.callback is not None
+            await self.callback(
+                {
+                    "type": "content",
+                    "metadata": {
+                        "call_kind": "quiz_question_emitted",
+                        "question_index": 0,
+                        "qa_pair": {
+                            "question_id": "q_1",
+                            "question": "Which graph represents y = x²?",
+                            "question_type": "choice",
+                            "options": {"A": "A parabola", "B": "A line"},
+                            "correct_answer": "A",
+                            "explanation": "A quadratic graph is a parabola.",
+                            "difficulty": "hard",
+                        },
+                    },
+                }
+            )
+            return {"success": True, "completed": 1, "failed": 0}
+
+    class _FakePathService:
+        def get_question_batch_dir(self, task_id: str) -> Path:
+            return tmp_path / task_id
+
+    monkeypatch.setattr(question_router_module, "AgentCoordinator", _FakeCoordinator)
+    monkeypatch.setattr(question_router_module, "get_path_service", lambda: _FakePathService())
+
+    with TestClient(_build_app(question_router_module)) as client:
+        with client.websocket_connect("/api/v1/question/generate") as websocket:
+            task_id_started = time.perf_counter()
+            websocket.send_json(
+                {
+                    "requirement": {
+                        "knowledge_point": "Quadratic functions",
+                        "preference": "Focus on graph recognition",
+                        "difficulty": " Hard ",
+                        "question_type": " Choice ",
+                    },
+                    "kb_name": "demo-kb",
+                    "count": "1",
+                }
+            )
+            first_message = websocket.receive_json()
+            task_id_elapsed = time.perf_counter() - task_id_started
+            messages = [first_message, *[websocket.receive_json() for _ in range(4)]]
+
+    assert calls == [
+        {
+            "user_topic": (
+                "Quadratic functions\n\n"
+                "Additional question requirements: Focus on graph recognition"
+            ),
+            "num_questions": 1,
+            "difficulty": "hard",
+            "question_types": ["choice"],
+            "per_type_counts": {"choice": 1},
+        }
+    ]
+    assert [message["type"] for message in messages] == [
+        "task_id",
+        "status",
+        "question",
+        "batch_summary",
+        "complete",
+    ]
+    assert task_id_elapsed < 3.0
+    print(f"task_id_elapsed_s={task_id_elapsed:.6f}")
+    assert messages[2]["question"]["question_id"] == "q_1"
+    assert messages[2]["question"]["question_type"] == "choice"
+    assert messages[3] == {
+        "type": "batch_summary",
+        "requested": 1,
+        "completed": 1,
+        "failed": 0,
+    }
+
+
+def test_legacy_question_event_marks_pipeline_validation_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    question_router_module = _load_question_router_module(monkeypatch)
+
+    event = question_router_module._legacy_question_event(
+        {
+            "type": "content",
+            "metadata": {
+                "call_kind": "quiz_question_emitted",
+                "question_index": 2,
+                "qa_pair": {"question_id": "q_bad", "question": "invalid"},
+                "qa_metadata": {
+                    "issues": ["missing_correct_answer"],
+                    "error": "quiz_payload_validation_failed",
+                },
+            },
+        }
+    )
+
+    assert event["type"] == "question"
+    assert event["success"] is False
+    assert event["index"] == 2
+
+
+@pytest.mark.parametrize(
+    ("count", "question_type", "expected_error"),
+    [
+        (0, "choice", "count must be an integer between 1 and 50"),
+        ("many", "choice", "count must be an integer between 1 and 50"),
+        (51, "choice", "count must be an integer between 1 and 50"),
+        (1, "multiple_choice", "Unsupported question_type: multiple_choice"),
+        (1, ["choice"], "question_type must be a string"),
+    ],
+)
+def test_generate_websocket_rejects_invalid_count_or_question_type(
+    monkeypatch: pytest.MonkeyPatch,
+    count,
+    question_type,
+    expected_error: str,
+) -> None:
+    question_router_module = _load_question_router_module(monkeypatch)
+    _install_ws_auth_stubs(monkeypatch)
+
+    class _UnexpectedCoordinator:
+        def __init__(self, **_kwargs) -> None:
+            raise AssertionError("Coordinator must not be created for invalid payloads")
+
+    monkeypatch.setattr(question_router_module, "AgentCoordinator", _UnexpectedCoordinator)
+
+    with TestClient(_build_app(question_router_module)) as client:
+        with client.websocket_connect("/api/v1/question/generate") as websocket:
+            websocket.send_json(
+                {
+                    "requirement": {
+                        "knowledge_point": "Algebra",
+                        "question_type": question_type,
+                    },
+                    "count": count,
+                }
+            )
+            message = websocket.receive_json()
+
+    assert message["type"] == "error"
+    assert expected_error in message["content"]

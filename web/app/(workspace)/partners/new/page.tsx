@@ -157,7 +157,7 @@ export default function NewPartnerPage() {
       });
       // Land in the chat tab — the partner is ready to talk to right away
       // (any provisioning misses are visible on the Configure tab's library).
-      router.push(`/partners/${result.partner_id}`);
+      router.push(`/partners/${encodeURIComponent(result.partner_id)}`);
     } catch (e) {
       setError(e instanceof Error ? e.message : t("Create failed"));
       setCreating(false);

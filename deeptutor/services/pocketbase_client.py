@@ -116,7 +116,7 @@ def validate_pb_token(token: str) -> dict[str, Any] | None:
     Results are cached for ``_TOKEN_CACHE_TTL`` seconds so only the
     first call per token per minute makes a network round-trip.
 
-    Returns a dict with at least ``username`` and ``role`` keys, or
+    Returns a dict with at least ``id``, ``username`` and ``role`` keys, or
     None if the token is invalid / expired.
     """
     settings = _pocketbase_settings()
@@ -152,7 +152,11 @@ def validate_pb_token(token: str) -> dict[str, Any] | None:
         )
         role = str(getattr(record, "role", "user") or "user")
 
-        payload = {"username": str(username), "role": role}
+        payload = {
+            "id": str(getattr(record, "id", "") or ""),
+            "username": str(username),
+            "role": role,
+        }
         _TOKEN_CACHE[token] = (payload, now + _TOKEN_CACHE_TTL)
         return payload
 

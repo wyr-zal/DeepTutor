@@ -1216,6 +1216,7 @@ class QuestionPipeline:
             question_index=index,
             total_questions=total,
             qa_pair=self._qa_pair_to_dict(qa_pair),
+            qa_metadata=dict(qa_pair.metadata),
         )
         await stream.content(
             self._render_question_markdown(qa_pair, index + 1),
@@ -1409,7 +1410,9 @@ class QuestionPipeline:
             options=payload.get("options") if isinstance(payload.get("options"), dict) else None,
             topic=template.topic,
             difficulty=template.difficulty,
-            metadata={"issues": issues} if issues else {},
+            metadata=(
+                {"issues": issues, "error": "quiz_payload_validation_failed"} if issues else {}
+            ),
         )
 
     # ------------------------------------------------------------------

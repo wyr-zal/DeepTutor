@@ -142,6 +142,24 @@ class AuthStatusResponse(BaseModel):
     avatar: str = ""
 
 
+class TokenUserInfo(BaseModel):
+    """Authenticated user metadata returned alongside a native access token."""
+
+    user_id: str
+    username: str
+    role: str
+    is_admin: bool
+
+
+class TokenResponse(BaseModel):
+    """Bearer-token response for non-browser clients."""
+
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
+    user: TokenUserInfo
+
+
 class UserInfo(BaseModel):
     """Single user record returned by the GET /users and /profile endpoints."""
 
@@ -446,6 +464,62 @@ async def login(body: LoginRequest, response: Response) -> dict:
         "role": result.role,
         "is_admin": result.role == "admin",
     }
+
+
+@router.post("/token", response_model=TokenResponse)
+async def issue_access_token(body: LoginRequest, response: Response) -> TokenResponse:
+    """Validate credentials and return a Bearer token for native clients.
+
+    Unlike ``/login``, this endpoint never writes a browser cookie. When
+    authentication is disabled there is deliberately no synthetic token:
+    protected routes are already available without credentials in that mode.
+    """
+    if not AUTH_ENABLED:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Authentication is disabled; no access token is required.",
+        )
+
+    # Token-bearing responses must not be stored by browsers, proxies, or
+    # native HTTP caches. This endpoint intentionally never sets ``dt_token``.
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+
+    if POCKETBASE_ENABLED:
+        pb_result = authenticate_pb(body.username, body.password)
+        if not pb_result:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect email or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        payload, token = pb_result
+    else:
+        payload = authenticate(body.username, body.password)
+        if not payload:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Incorrect username or password",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        token = create_token(payload.username, payload.role, payload.user_id)
+
+    logger.info(
+        "Issued native access token for user '%s' (role=%r, provider=%s)",
+        payload.username,
+        payload.role,
+        "pocketbase" if POCKETBASE_ENABLED else "local",
+    )
+    return TokenResponse(
+        access_token=token,
+        expires_in=_COOKIE_MAX_AGE,
+        user=TokenUserInfo(
+            user_id=payload.user_id,
+            username=payload.username,
+            role=payload.role,
+            is_admin=payload.role == "admin",
+        ),
+    )
 
 
 @router.post("/logout")

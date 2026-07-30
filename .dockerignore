@@ -90,6 +90,9 @@ web/out/
 # ============================================
 .idea/
 .vscode/
+.omx/
+.understand-anything/
+NUL
 *.swp
 *.swo
 *~
