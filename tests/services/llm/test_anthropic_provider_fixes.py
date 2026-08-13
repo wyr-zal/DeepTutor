@@ -48,7 +48,13 @@ def _kwargs(provider: AnthropicProvider, model: str) -> dict[str, Any]:
 
 def test_temperature_omitted_for_effort_based_models() -> None:
     provider = _provider()
-    for model in ("claude-opus-4-8", "claude-sonnet-5", "claude-opus-4-7", "claude-fable-5"):
+    for model in (
+        "claude-opus-4-8",
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-opus-4-7",
+        "claude-fable-5",
+    ):
         assert "temperature" not in _kwargs(provider, model), model
 
 
@@ -104,10 +110,16 @@ def _kwargs_with_effort(provider: AnthropicProvider, model: str, effort: str) ->
 
 
 def test_effort_based_families_map_real_effort_to_adaptive_thinking() -> None:
-    """Opus 4.7+/Sonnet 5/Fable 5 reject enabled+budget_tokens with a 400 —
-    a configured effort level must become adaptive thinking there."""
+    """Opus 4.7+/Opus 5/Sonnet 5/Fable 5 reject enabled+budget_tokens with a
+    400 — a configured effort level must become adaptive thinking there."""
     provider = _provider()
-    for model in ("claude-opus-4-8", "claude-sonnet-5", "claude-opus-4-7", "claude-fable-5"):
+    for model in (
+        "claude-opus-4-8",
+        "claude-opus-5",
+        "claude-sonnet-5",
+        "claude-opus-4-7",
+        "claude-fable-5",
+    ):
         kwargs = _kwargs_with_effort(provider, model, "high")
         assert kwargs["thinking"] == {"type": "adaptive"}, model
         assert "temperature" not in kwargs, model
@@ -127,3 +139,37 @@ def test_older_models_keep_budget_tokens_thinking() -> None:
     assert kwargs["thinking"]["type"] == "enabled"
     assert kwargs["thinking"]["budget_tokens"] >= 8192
     assert kwargs["temperature"] == 1.0
+
+
+def test_older_models_omit_thinking_for_off_sentinels() -> None:
+    """An off-sentinel used to fall through to the budget branch, where an
+    unrecognised value means "default budget" — so `none` turned thinking ON."""
+    provider = _provider()
+    for effort in ("none", "minimal", "minimum"):
+        kwargs = _kwargs_with_effort(provider, "claude-opus-4-6", effort)
+        assert "thinking" not in kwargs, effort
+        assert kwargs["temperature"] == 0.7, effort
+
+
+def test_older_models_translate_adaptive_into_budget_thinking() -> None:
+    """The older families reject `thinking: {type: adaptive}`, so a stored
+    adaptive selection has to land on the budget form instead of a 400."""
+    provider = _provider()
+    kwargs = _kwargs_with_effort(provider, "claude-sonnet-4-5", "adaptive")
+    assert kwargs["thinking"] == {"type": "enabled", "budget_tokens": 4096}
+    assert kwargs["temperature"] == 1.0
+
+
+def test_off_sentinels_leave_tool_choice_to_the_caller() -> None:
+    """Extended thinking forces tool_choice=auto; thinking-off must not."""
+    provider = _provider()
+    kwargs = provider._build_kwargs(
+        messages=[{"role": "user", "content": "hi"}],
+        tools=[{"function": {"name": "t", "description": "", "parameters": {}}}],
+        model="claude-opus-4-6",
+        max_tokens=1024,
+        temperature=0.7,
+        reasoning_effort="none",
+        tool_choice="required",
+    )
+    assert kwargs["tool_choice"] == {"type": "any"}

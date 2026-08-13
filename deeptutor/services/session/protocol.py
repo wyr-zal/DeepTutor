@@ -52,8 +52,8 @@ class SessionStoreProtocol(Protocol):
         events: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
-        parent_message_id: int | None = None,
-    ) -> int: ...
+        parent_message_id: int | str | None = None,
+    ) -> int | str: ...
 
     async def delete_message(self, message_id: int | str) -> bool: ...
 
@@ -72,6 +72,12 @@ class SessionStoreProtocol(Protocol):
         limit: int = 50,
         offset: int = 0,
     ) -> list[dict[str, Any]]: ...
+
+    async def sync_sessions(
+        self,
+        cursor: int = 0,
+        limit: int = 200,
+    ) -> dict[str, Any]: ...
 
     async def update_summary(self, session_id: str, summary: str, up_to_msg_id: int) -> bool: ...
 

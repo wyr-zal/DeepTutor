@@ -157,6 +157,42 @@ class SQLiteSessionStore:
                 CREATE INDEX IF NOT EXISTS idx_sessions_updated_at
                     ON sessions(updated_at DESC);
 
+                CREATE TABLE IF NOT EXISTS session_changes (
+                    revision INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT NOT NULL,
+                    changed_at REAL NOT NULL,
+                    deleted INTEGER NOT NULL DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_session_changes_session_revision
+                    ON session_changes(session_id, revision DESC);
+
+                CREATE TRIGGER IF NOT EXISTS session_changes_after_insert
+                AFTER INSERT ON sessions
+                BEGIN
+                    INSERT INTO session_changes (session_id, changed_at, deleted)
+                    VALUES (NEW.id, NEW.updated_at, 0);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS session_changes_after_update
+                AFTER UPDATE ON sessions
+                BEGIN
+                    INSERT INTO session_changes (session_id, changed_at, deleted)
+                    VALUES (NEW.id, NEW.updated_at, 0);
+                END;
+
+                CREATE TRIGGER IF NOT EXISTS session_changes_before_delete
+                BEFORE DELETE ON sessions
+                BEGIN
+                    INSERT INTO session_changes (session_id, changed_at, deleted)
+                    VALUES (OLD.id, strftime('%s', 'now'), 1);
+                END;
+
+                INSERT INTO session_changes (session_id, changed_at, deleted)
+                SELECT id, updated_at, 0
+                FROM sessions
+                WHERE NOT EXISTS (SELECT 1 FROM session_changes);
+
                 CREATE TABLE IF NOT EXISTS turns (
                     id TEXT PRIMARY KEY,
                     session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -703,6 +739,73 @@ class SQLiteSessionStore:
     async def append_turn_event(self, turn_id: str, event: dict[str, Any]) -> dict[str, Any]:
         return await self._run(self._append_turn_event_sync, turn_id, event)
 
+    def _append_turn_events_sync(
+        self, turn_id: str, events: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        # Batch variant of _append_turn_event_sync: one transaction for the whole
+        # post-stream flush instead of one fsync'd commit per event. On slow
+        # storage (e.g. NAS spinning disks) per-event commits stretch a turn's
+        # finalisation to minutes while the client spinner keeps running.
+        now = time.time()
+        with self._connect() as conn:
+            turn = conn.execute(
+                "SELECT id, session_id FROM turns WHERE id = ?", (turn_id,)
+            ).fetchone()
+            if turn is None:
+                raise ValueError(f"Turn not found: {turn_id}")
+            row = conn.execute(
+                "SELECT COALESCE(MAX(seq), 0) AS last_seq FROM turn_events WHERE turn_id = ?",
+                (turn_id,),
+            ).fetchone()
+            next_seq = (int(row["last_seq"]) if row else 0) + 1
+            payloads: list[dict[str, Any]] = []
+            rows: list[tuple[Any, ...]] = []
+            for event in events:
+                provided_seq = int(event.get("seq") or 0)
+                if provided_seq > 0:
+                    seq = provided_seq
+                    next_seq = max(next_seq, provided_seq + 1)
+                else:
+                    seq = next_seq
+                    next_seq += 1
+                payload = dict(event)
+                payload["seq"] = seq
+                payload["turn_id"] = payload.get("turn_id") or turn_id
+                payload["session_id"] = payload.get("session_id") or turn["session_id"]
+                payloads.append(payload)
+                rows.append(
+                    (
+                        turn_id,
+                        seq,
+                        payload.get("type", ""),
+                        payload.get("source", ""),
+                        payload.get("stage", ""),
+                        payload.get("content", "") or "",
+                        _json_dumps(payload.get("metadata", {})),
+                        float(payload.get("timestamp") or now),
+                        now,
+                    )
+                )
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO turn_events (
+                    turn_id, seq, type, source, stage, content, metadata_json, timestamp, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+            conn.execute(
+                "UPDATE turns SET updated_at = ? WHERE id = ?",
+                (now, turn_id),
+            )
+            conn.commit()
+        return payloads
+
+    async def append_turn_events(
+        self, turn_id: str, events: list[dict[str, Any]]
+    ) -> list[dict[str, Any]]:
+        return await self._run(self._append_turn_events_sync, turn_id, events)
+
     def _get_turn_events_sync(self, turn_id: str, after_seq: int = 0) -> list[dict[str, Any]]:
         with self._connect() as conn:
             rows = conn.execute(
@@ -768,7 +871,7 @@ class SQLiteSessionStore:
         events: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
-        parent_message_id: int | None | _Unset = _PARENT_AUTO,
+        parent_message_id: int | str | None | _Unset = _PARENT_AUTO,
     ) -> int:
         now = time.time()
         with self._connect() as conn:
@@ -836,7 +939,10 @@ class SQLiteSessionStore:
         events: list[dict[str, Any]] | None = None,
         attachments: list[dict[str, Any]] | None = None,
         metadata: dict[str, Any] | None = None,
-        parent_message_id: int | None | _Unset = _PARENT_AUTO,
+        # ``str`` satisfies SessionStoreProtocol (PocketBase parents are string
+        # record ids); on the SQLite backend a non-None parent is always the
+        # integer rowid this store itself returned.
+        parent_message_id: int | str | None | _Unset = _PARENT_AUTO,
     ) -> int:
         return await self._run(
             self._add_message_sync,
@@ -1353,6 +1459,93 @@ class SQLiteSessionStore:
     ) -> list[dict[str, Any]]:
         return await self._run(self._list_sessions_sync, limit, offset)
 
+    def _sync_sessions_sync(
+        self,
+        cursor: int = 0,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        normalized_cursor = max(0, int(cursor))
+        normalized_limit = max(1, min(int(limit), 200))
+        with self._connect() as conn:
+            latest_row = conn.execute(
+                "SELECT COALESCE(MAX(revision), 0) AS revision FROM session_changes"
+            ).fetchone()
+            latest_revision = int(latest_row["revision"]) if latest_row else 0
+            if normalized_cursor == 0:
+                rows = conn.execute(
+                    self._SESSION_SUMMARY_SQL.format(where=self._WHERE_NATIVE),
+                    (normalized_limit, 0),
+                ).fetchall()
+                sessions = []
+                for row in rows:
+                    payload = dict(row)
+                    payload["session_id"] = payload["id"]
+                    payload["preferences"] = _json_loads(
+                        payload.pop("preferences_json", ""), {}
+                    )
+                    payload["revision"] = latest_revision
+                    sessions.append(payload)
+                return {
+                    "cursor": latest_revision,
+                    "sessions": sessions,
+                    "deleted_session_ids": [],
+                    "has_more": False,
+                }
+
+            change_rows = conn.execute(
+                """
+                SELECT revision, session_id, deleted
+                FROM session_changes
+                WHERE revision > ?
+                ORDER BY revision ASC
+                LIMIT ?
+                """,
+                (normalized_cursor, normalized_limit),
+            ).fetchall()
+            next_cursor = (
+                int(change_rows[-1]["revision"]) if change_rows else normalized_cursor
+            )
+            latest_by_session: dict[str, sqlite3.Row] = {}
+            for row in change_rows:
+                latest_by_session[row["session_id"]] = row
+
+            sessions: list[dict[str, Any]] = []
+            deleted_session_ids: list[str] = []
+            for session_id, change in latest_by_session.items():
+                if bool(change["deleted"]):
+                    deleted_session_ids.append(session_id)
+                    continue
+                rows = conn.execute(
+                    self._SESSION_SUMMARY_SQL.format(
+                        where="WHERE s.id = ? AND s.id NOT LIKE 'imported\\_%' ESCAPE '\\'"
+                    ),
+                    (session_id, 1, 0),
+                ).fetchall()
+                if not rows:
+                    continue
+                payload = dict(rows[0])
+                payload["session_id"] = payload["id"]
+                payload["preferences"] = _json_loads(
+                    payload.pop("preferences_json", ""), {}
+                )
+                payload["revision"] = int(change["revision"])
+                sessions.append(payload)
+
+            sessions.sort(key=lambda item: item.get("updated_at") or 0, reverse=True)
+            return {
+                "cursor": next_cursor,
+                "sessions": sessions,
+                "deleted_session_ids": deleted_session_ids,
+                "has_more": bool(change_rows) and next_cursor < latest_revision,
+            }
+
+    async def sync_sessions(
+        self,
+        cursor: int = 0,
+        limit: int = 200,
+    ) -> dict[str, Any]:
+        return await self._run(self._sync_sessions_sync, cursor, limit)
+
     async def list_imported_sessions(
         self,
         limit: int = 50,
@@ -1645,36 +1838,24 @@ class SQLiteSessionStore:
         question_id: str,
         turn_id: str | None = None,
     ) -> dict[str, Any] | None:
+        # A missing turn_id only ever matches the legacy namespace (rows
+        # persisted before turn scoping, migrated with turn_id=''). It must
+        # never fall back to other turns' rows: positional question ids
+        # (``q_1``..``q_N``) repeat across quizzes in one session, so a
+        # cross-turn match would leak a previous quiz's answers into a new
+        # quiz (issues #487 / #677).
         with self._connect() as conn:
-            if turn_id is not None:
-                row = conn.execute(
-                    """
-                    SELECT n.*, COALESCE(s.title, '') AS session_title
-                    FROM notebook_entries n
-                    LEFT JOIN sessions s ON s.id = n.session_id
-                    WHERE n.session_id = ?
-                      AND n.turn_id = ?
-                      AND n.question_id = ?
-                    """,
-                    (session_id, turn_id, question_id),
-                ).fetchone()
-            else:
-                # Legacy lookup: return the most recent matching entry across
-                # turns. Two quizzes in the same session can share a question_id
-                # (positional IDs like ``q_1``), so we explicitly pick the
-                # newest one to keep behavior deterministic for callers that
-                # don't yet pass a turn_id.
-                row = conn.execute(
-                    """
-                    SELECT n.*, COALESCE(s.title, '') AS session_title
-                    FROM notebook_entries n
-                    LEFT JOIN sessions s ON s.id = n.session_id
-                    WHERE n.session_id = ? AND n.question_id = ?
-                    ORDER BY n.updated_at DESC, n.id DESC
-                    LIMIT 1
-                    """,
-                    (session_id, question_id),
-                ).fetchone()
+            row = conn.execute(
+                """
+                SELECT n.*, COALESCE(s.title, '') AS session_title
+                FROM notebook_entries n
+                LEFT JOIN sessions s ON s.id = n.session_id
+                WHERE n.session_id = ?
+                  AND n.turn_id = ?
+                  AND n.question_id = ?
+                """,
+                (session_id, turn_id if turn_id is not None else "", question_id),
+            ).fetchone()
         if row is None:
             return None
         return self._serialize_notebook_entry(row)

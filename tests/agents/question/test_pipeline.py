@@ -23,7 +23,10 @@ from deeptutor.agents.question.pipeline import (
     QuizPair,
     QuizPlan,
     QuizTemplate,
+    _BaseLoopHost,
 )
+from deeptutor.core.agentic.tool_dispatch import DispatchOutcome
+from deeptutor.core.context import UnifiedContext
 
 # ---------------------------------------------------------------------------
 # Test helpers
@@ -90,6 +93,44 @@ class _StubStreamBus:
         self.error_events.append(
             {"message": message, "source": source, "stage": stage, "metadata": metadata or {}}
         )
+
+
+@pytest.mark.asyncio
+async def test_question_loop_resumes_after_ask_user_reply() -> None:
+    bus = _StubStreamBus()
+
+    async def wait_for_reply() -> dict[str, Any]:
+        return {
+            "text": "",
+            "answers": [{"questionId": "topic", "text": "线性代数"}],
+        }
+
+    host = _BaseLoopHost(
+        pipeline=_make_pipeline(),
+        stream=bus,
+        context=UnifiedContext(metadata={"wait_for_user_reply": wait_for_reply}),
+        client=None,
+    )
+    dispatch = DispatchOutcome(
+        pause=True,
+        pause_payload={
+            "ask_user": {
+                "questions": [{"id": "topic", "prompt": "你想练习哪个主题？"}],
+            },
+        },
+        pause_tool_call_id="ask-topic",
+        tool_messages=[{"tool_call_id": "ask-topic", "content": ""}],
+    )
+
+    assert await host.resolve_pause(dispatch) is True
+    assert "线性代数" in dispatch.tool_messages[0]["content"]
+    assert bus.progress_events[0]["metadata"] == {
+        "trace_kind": "user_reply",
+        "ask_user_resolved": True,
+        "ask_user_tool_call_id": "ask-topic",
+        "reply_preview": "",
+        "answers": [{"questionId": "topic", "text": "线性代数"}],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1006,3 +1047,14 @@ def test_parse_exam_paper_to_templates_happy_path(monkeypatch, tmp_path: Path) -
     assert templates[1].question_type == "choice"
     assert trace["template_count"] == "2"
     assert trace["question_file"].endswith("exam_questions.json")
+
+
+def test_parse_quiz_payload_tolerates_trailing_brace_prose() -> None:
+    raw = (
+        '{"question":"What is 2+2?","correct_answer":"4",'
+        '"explanation":"basic arithmetic"} note: see {docs}'
+    )
+    parsed = QuestionPipeline._parse_quiz_payload(raw)
+    assert parsed["question"] == "What is 2+2?"
+    assert parsed["correct_answer"] == "4"
+    assert parsed["explanation"] == "basic arithmetic"

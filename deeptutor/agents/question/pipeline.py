@@ -1300,11 +1300,12 @@ class QuestionPipeline:
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:
-            obj = re.search(r"\{[\s\S]*\}", text)
-            if obj is None:
+            # First JSON object only; trailing brace-prose must not extend the slice.
+            start = text.find("{")
+            if start == -1:
                 return {}
             try:
-                parsed = json.loads(obj.group(0))
+                parsed, _end = json.JSONDecoder().raw_decode(text[start:])
             except json.JSONDecodeError:
                 return {}
         return parsed if isinstance(parsed, dict) else {}
@@ -1949,9 +1950,44 @@ class _BaseLoopHost:
         )
 
     async def resolve_pause(self, dispatch: DispatchOutcome) -> bool:
-        # ``ask_user`` would pause the turn — quiz pipeline v1 doesn't wire up
-        # the wait/resume path. Terminate the loop so the turn closes cleanly.
-        return False
+        # ``ask_user`` pauses the turn: park on the runtime's reply waiter so
+        # answers submitted from any client resume quiz generation in place.
+        from deeptutor.agents.chat.agentic_pipeline import (
+            _format_user_reply_body,
+            _normalise_user_reply,
+        )
+
+        ask_user = (dispatch.pause_payload or {}).get("ask_user") or {}
+        waiter = self._context.metadata.get("wait_for_user_reply")
+        if not callable(waiter):
+            return False
+        raw_reply = await waiter()
+        if raw_reply is None:
+            return False
+        reply_text, answers = _normalise_user_reply(raw_reply)
+        body_text = _format_user_reply_body(reply_text, answers, ask_user)
+        continue_directive = self._pipeline._t(
+            "notices.ask_user_resolved_directive",
+            default=(
+                "[ask_user resolved. Continue the user's original request using these answers. "
+                "Do not stop with an acknowledgement.]"
+            ),
+        )
+        directive = f"{body_text}\n\n{continue_directive}"
+        for tm in dispatch.tool_messages:
+            if tm.get("tool_call_id") == dispatch.pause_tool_call_id:
+                tm["content"] = directive
+                break
+        meta: dict[str, Any] = {
+            "trace_kind": "user_reply",
+            "ask_user_resolved": True,
+            "ask_user_tool_call_id": dispatch.pause_tool_call_id,
+            "reply_preview": (reply_text or "")[:200],
+        }
+        if answers:
+            meta["answers"] = list(answers)
+        await self._stream.progress("", source=SOURCE, stage=self._stage, metadata=meta)
+        return True
 
     async def emit_terminator(self, payload: dict[str, Any] | None) -> None:
         # No quiz tool is wired to terminate the loop with content.

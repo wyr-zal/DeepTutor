@@ -13,8 +13,19 @@ import {
 import { useRouter } from "next/navigation";
 import { useTranslation } from "react-i18next";
 
-import { writeStoredLanguage } from "@/context/app-shell-storage";
+import type { CodeBlockThemeId } from "@/components/common/code-block-themes";
+import {
+  normalizeCodeBlockTheme,
+  writeStoredCodeBlockShowLineNumbers,
+  writeStoredCodeBlockTheme,
+  writeStoredCodeBlockWrapLongLines,
+  writeStoredLanguage,
+  writeStoredResponseLanguage,
+} from "@/context/app-shell-storage";
+import { useAppShell } from "@/context/AppShellContext";
 import { apiFetch, apiUrl } from "@/lib/api";
+import { invalidateLLMOptionsCache } from "@/lib/llm-options";
+import { setModelReasoningEffort } from "@/lib/reasoning-effort";
 import { setTheme as applyThemePreference } from "@/lib/theme";
 
 // ─── Domain types ─────────────────────────────────────────────────────────
@@ -32,12 +43,14 @@ export type CatalogModel = {
   id: string;
   name: string;
   model: string;
+  managed_by?: string;
   dimension?: string;
   send_dimensions?: boolean;
   supported_dimensions?: string;
   context_window?: string;
   context_window_source?: string;
   context_window_detected_at?: string;
+  reasoning_effort?: string;
   // Voice (TTS): free-form provider/model-specific voice string, e.g.
   // "alloy", "autumn", "model:voice". `response_format` is the TTS output
   // codec (mp3/wav/...) and is reused by imagegen ("url"/"b64_json").
@@ -67,6 +80,8 @@ export type LlmContextWindowDetection = {
 export type CatalogProfile = {
   id: string;
   name: string;
+  managed_by?: string;
+  read_only?: boolean;
   binding?: string;
   provider?: string;
   base_url: string;
@@ -100,7 +115,51 @@ export type Catalog = {
 export type UiSettings = {
   theme: "light" | "dark" | "glass" | "snow";
   language: "en" | "zh";
+  response_language: "en" | "zh";
+  code_block_theme: string;
+  code_block_show_line_numbers: boolean;
+  code_block_wrap_long_lines: boolean;
 };
+
+type CodeBlockUiSettings = Pick<
+  UiSettings,
+  | "code_block_theme"
+  | "code_block_show_line_numbers"
+  | "code_block_wrap_long_lines"
+>;
+
+type UiSettingsPatch = Partial<UiSettings>;
+
+export function syncLoadedCodeBlockSettingsToAppShell(
+  ui: Partial<CodeBlockUiSettings>,
+): CodeBlockUiSettings {
+  const normalized = {
+    code_block_theme: normalizeCodeBlockTheme(ui.code_block_theme),
+    code_block_show_line_numbers:
+      ui.code_block_show_line_numbers === true ||
+      String(ui.code_block_show_line_numbers).toLowerCase() === "true",
+    code_block_wrap_long_lines:
+      ui.code_block_wrap_long_lines === true ||
+      String(ui.code_block_wrap_long_lines).toLowerCase() === "true",
+  };
+
+  writeStoredCodeBlockTheme(normalized.code_block_theme);
+  writeStoredCodeBlockShowLineNumbers(normalized.code_block_show_line_numbers);
+  writeStoredCodeBlockWrapLongLines(normalized.code_block_wrap_long_lines);
+
+  return normalized;
+}
+
+export async function persistUiSettingsPatch(
+  patch: UiSettingsPatch,
+  fetcher: typeof apiFetch = apiFetch,
+): Promise<void> {
+  await fetcher(apiUrl("/api/v1/settings/ui"), {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(patch),
+  });
+}
 
 export type ProviderOption = {
   value: string;
@@ -109,6 +168,7 @@ export type ProviderOption = {
   default_dim?: string;
   default_model?: string;
   default_voice?: string;
+  auth_mode?: "api_key" | "oauth";
 };
 
 export type SystemStatus = {
@@ -389,12 +449,22 @@ type SettingsContextValue = {
   hasUnsavedChanges: boolean;
   theme: UiSettings["theme"];
   language: UiSettings["language"];
+  responseLanguage: UiSettings["response_language"];
+  codeBlockTheme: UiSettings["code_block_theme"];
+  codeBlockShowLineNumbers: UiSettings["code_block_show_line_numbers"];
+  codeBlockWrapLongLines: UiSettings["code_block_wrap_long_lines"];
   toast: string;
   setToast: (value: string) => void;
 
   // UI prefs
   updateTheme: (next: UiSettings["theme"]) => Promise<void>;
   updateLanguage: (next: UiSettings["language"]) => Promise<void>;
+  updateResponseLanguage: (
+    next: UiSettings["response_language"],
+  ) => Promise<void>;
+  updateCodeBlockTheme: (next: CodeBlockThemeId) => Promise<void>;
+  updateCodeBlockShowLineNumbers: (next: boolean) => Promise<void>;
+  updateCodeBlockWrapLongLines: (next: boolean) => Promise<void>;
 
   // Catalog mutation
   mutateCatalog: (mutator: (next: Catalog) => void) => void;
@@ -418,6 +488,7 @@ type SettingsContextValue = {
     value: boolean,
   ) => void;
   updateContextWindowField: (value: string) => void;
+  updateReasoningEffort: (value: string) => void;
   llmContextDetection: LlmContextWindowDetection | null;
   applyDetectedContextWindow: () => void;
 
@@ -466,10 +537,23 @@ export function useSettings(): SettingsContextValue {
 export function SettingsProvider({ children }: { children: ReactNode }) {
   const { t } = useTranslation();
   const router = useRouter();
+  // Code-block appearance lives in AppShellContext (the single source of truth,
+  // also consumed by RichCodeBlock). Read the values from there and delegate
+  // writes to its setters; this provider only adds backend persistence on top.
+  const {
+    codeBlockTheme,
+    codeBlockShowLineNumbers,
+    codeBlockWrapLongLines,
+    setCodeBlockTheme: setAppShellCodeBlockTheme,
+    setCodeBlockShowLineNumbers: setAppShellCodeBlockShowLineNumbers,
+    setCodeBlockWrapLongLines: setAppShellCodeBlockWrapLongLines,
+  } = useAppShell();
 
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [theme, setTheme] = useState<UiSettings["theme"]>("snow");
   const [language, setLanguage] = useState<UiSettings["language"]>("en");
+  const [responseLanguage, setResponseLanguage] =
+    useState<UiSettings["response_language"]>("en");
   const [catalog, setCatalog] = useState<Catalog>(defaultCatalog());
   const [draft, setDraft] = useState<Catalog>(defaultCatalog());
   const [catalogEditable, setCatalogEditable] = useState<boolean | null>(null);
@@ -556,6 +640,11 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       }
       setTheme(payload.ui.theme);
       setLanguage(payload.ui.language);
+      setResponseLanguage(payload.ui.response_language ?? payload.ui.language);
+      // Writes the backend-loaded values into app-shell storage and dispatches
+      // the code-block settings event; AppShellContext (the single source) picks
+      // them up, so no separate copy needs seeding here.
+      syncLoadedCodeBlockSettingsToAppShell(payload.ui);
       if (payload.providers) setProviders(payload.providers);
       settingsLoaded = true;
     } catch (err) {
@@ -591,6 +680,8 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
 
   // Load settings + status once on mount. Subsequent navigations between
   // settings sub-pages share this state via the layout-level provider.
+  // Code-block switch hydration lives in AppShellContext (the single source),
+  // so no separate post-mount re-read is needed here.
   useEffect(() => {
     loadSettings();
     return () => {
@@ -616,36 +707,52 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
   }, [diagnosticsResults]);
 
   // ── UI preferences ──────────────────────────────────────────────────────
-  const persistUi = useCallback(
-    async (
-      nextTheme: UiSettings["theme"],
-      nextLanguage: UiSettings["language"],
-    ) => {
-      await apiFetch(apiUrl("/api/v1/settings/ui"), {
-        method: "PUT",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ theme: nextTheme, language: nextLanguage }),
-      });
+  const updateTheme = useCallback(async (next: UiSettings["theme"]) => {
+    setTheme(next);
+    applyThemePreference(next);
+    await persistUiSettingsPatch({ theme: next });
+  }, []);
+
+  const updateLanguage = useCallback(async (next: UiSettings["language"]) => {
+    setLanguage(next);
+    writeStoredLanguage(next);
+    await persistUiSettingsPatch({ language: next });
+  }, []);
+
+  const updateResponseLanguage = useCallback(
+    async (next: UiSettings["response_language"]) => {
+      setResponseLanguage(next);
+      writeStoredResponseLanguage(next);
+      await persistUiSettingsPatch({ response_language: next });
     },
     [],
   );
 
-  const updateTheme = useCallback(
-    async (next: UiSettings["theme"]) => {
-      setTheme(next);
-      applyThemePreference(next);
-      await persistUi(next, language);
+  // Each setter updates the app-shell source of truth (which normalizes,
+  // persists to localStorage, and notifies consumers) then mirrors the change
+  // to the backend.
+  const updateCodeBlockTheme = useCallback(
+    async (next: CodeBlockThemeId) => {
+      setAppShellCodeBlockTheme(next);
+      await persistUiSettingsPatch({ code_block_theme: next });
     },
-    [language, persistUi],
+    [setAppShellCodeBlockTheme],
   );
 
-  const updateLanguage = useCallback(
-    async (next: UiSettings["language"]) => {
-      setLanguage(next);
-      writeStoredLanguage(next);
-      await persistUi(theme, next);
+  const updateCodeBlockShowLineNumbers = useCallback(
+    async (next: boolean) => {
+      setAppShellCodeBlockShowLineNumbers(next);
+      await persistUiSettingsPatch({ code_block_show_line_numbers: next });
     },
-    [persistUi, theme],
+    [setAppShellCodeBlockShowLineNumbers],
+  );
+
+  const updateCodeBlockWrapLongLines = useCallback(
+    async (next: boolean) => {
+      setAppShellCodeBlockWrapLongLines(next);
+      await persistUiSettingsPatch({ code_block_wrap_long_lines: next });
+    },
+    [setAppShellCodeBlockWrapLongLines],
   );
 
   // ── Catalog mutators ────────────────────────────────────────────────────
@@ -854,6 +961,17 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
     [mutateCatalog],
   );
 
+  const updateReasoningEffort = useCallback(
+    (value: string) => {
+      mutateCatalog((next) => {
+        const model = getActiveModel(next, "llm");
+        if (!model) return;
+        setModelReasoningEffort(model, value);
+      });
+    },
+    [mutateCatalog],
+  );
+
   const applyDetectedContextWindow = useCallback(() => {
     if (!llmContextDetection) return;
     mutateCatalog((next) => {
@@ -890,6 +1008,8 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       const payload = await response.json();
       setCatalog(payload.catalog);
       setDraft(cloneCatalog(payload.catalog));
+      // The model list the chat composer shows is derived from this catalog.
+      invalidateLLMOptionsCache();
       setToast(t("Draft saved"));
     } finally {
       setSaving(false);
@@ -917,6 +1037,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
         const payload = await response.json();
         setCatalog(payload.catalog);
         setDraft(cloneCatalog(payload.catalog));
+        invalidateLLMOptionsCache();
         const statusResponse = await apiFetch(apiUrl("/api/v1/system/status"));
         setStatus((await statusResponse.json()) as SystemStatus);
       }
@@ -1161,10 +1282,18 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       hasUnsavedChanges,
       theme,
       language,
+      responseLanguage,
+      codeBlockTheme,
+      codeBlockShowLineNumbers,
+      codeBlockWrapLongLines,
       toast,
       setToast,
       updateTheme,
       updateLanguage,
+      updateResponseLanguage,
+      updateCodeBlockTheme,
+      updateCodeBlockShowLineNumbers,
+      updateCodeBlockWrapLongLines,
       mutateCatalog,
       addProfile,
       removeActiveProfile,
@@ -1174,6 +1303,7 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       updateModelField,
       updateModelBoolField,
       updateContextWindowField,
+      updateReasoningEffort,
       llmContextDetection,
       applyDetectedContextWindow,
       saving,
@@ -1201,12 +1331,16 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       applying,
       catalog,
       catalogEditable,
+      codeBlockShowLineNumbers,
+      codeBlockTheme,
+      codeBlockWrapLongLines,
       diagnosticsResults,
       draft,
       embeddingCapabilities,
       embeddingDefaultDim,
       hasUnsavedChanges,
       language,
+      responseLanguage,
       llmContextDetection,
       logs,
       mutateCatalog,
@@ -1229,8 +1363,13 @@ export function SettingsProvider({ children }: { children: ReactNode }) {
       theme,
       toast,
       tourStepIndex,
+      updateCodeBlockShowLineNumbers,
+      updateCodeBlockTheme,
+      updateCodeBlockWrapLongLines,
       updateContextWindowField,
+      updateReasoningEffort,
       updateLanguage,
+      updateResponseLanguage,
       updateModelBoolField,
       updateModelField,
       updateProfileField,

@@ -21,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 from deeptutor.multi_user.context import get_current_user
 from deeptutor.multi_user.model_access import allowed_llm_options
+from deeptutor.services.codex_auth import CodexAuthError, get_codex_oauth_service
 from deeptutor.services.config import (
     get_config_test_runner,
     get_model_catalog_service,
@@ -38,9 +39,20 @@ from deeptutor.services.llm.client import reset_llm_client
 from deeptutor.services.llm.config import clear_llm_config_cache
 from deeptutor.services.model_selection import list_llm_options
 from deeptutor.services.path_service import get_path_service
+from deeptutor.services.settings.interface_settings import (
+    DEFAULT_UI_SETTINGS as INTERFACE_DEFAULTS,
+)
+from deeptutor.services.settings.interface_settings import resolve_languages
 from deeptutor.tools.builtin import USER_TOGGLEABLE_TOOL_NAMES
 
 router = APIRouter()
+# Public UI-settings router. The app shell bootstraps the interface language
+# from GET /api/v1/settings/ui, and auth pages (/register, /login) must be
+# able to do the same *before* a session exists — so this one read endpoint
+# is intentionally mounted outside the ``_auth`` dependency (see main.py).
+# It only exposes non-sensitive UI preferences (theme/language), never the
+# model catalog, provider credentials, or runtime configuration.
+public_router = APIRouter()
 
 TOUR_CACHE = None
 
@@ -61,9 +73,10 @@ DEFAULT_SIDEBAR_NAV_ORDER = {
 }
 
 DEFAULT_UI_SETTINGS = {
-    # "snow" is the pure-white neutral theme, shown as "Default" in the UI.
-    "theme": "snow",
-    "language": "en",
+    # theme / language / response_language come from the module that owns
+    # interface.json, so the two readers of that file can't drift on what a
+    # fresh install defaults to.
+    **INTERFACE_DEFAULTS,
     "sidebar_description": "✨ Data Intelligence Lab @ HKU",
     "sidebar_nav_order": DEFAULT_SIDEBAR_NAV_ORDER,
     # User-toggleable chat tools. Default = all on; the /settings/tools page
@@ -95,8 +108,35 @@ class SidebarNavOrder(BaseModel):
 class UISettings(BaseModel):
     theme: Literal["light", "dark", "glass", "snow"] = "snow"
     language: Literal["zh", "en"] = "en"
+    response_language: Literal["zh", "en"] = "en"
     sidebar_description: Optional[str] = None
     sidebar_nav_order: Optional[SidebarNavOrder] = None
+    code_block_theme: Optional[str] = None
+    code_block_show_line_numbers: Optional[bool] = None
+    code_block_wrap_long_lines: Optional[bool] = None
+
+
+class UISettingsUpdate(BaseModel):
+    """Partial UI settings for user-initiated PATCH/PUT updates via /api/v1/settings/ui.
+
+    All fields have None defaults so `model_dump(exclude_unset=True)` naturally
+    excludes fields not provided in the frontend payload, while explicitly provided
+    defaults (e.g., `theme: "snow"`) still update the backend. This separates
+    the semantic contract: `/ui` endpoint only merges whatever explicitly arrives
+    from the frontend.
+    """
+
+    # Same Literal domains as UISettings — a None default keeps them optional
+    # for exclude_unset partial merges, but an explicit value is still validated
+    # so PUT /ui cannot persist a theme/language the app can't render.
+    theme: Literal["light", "dark", "glass", "snow"] | None = None
+    language: Literal["zh", "en"] | None = None
+    response_language: Literal["zh", "en"] | None = None
+    sidebar_description: str | None = None
+    sidebar_nav_order: SidebarNavOrder | None = None
+    code_block_theme: str | None = None
+    code_block_show_line_numbers: bool | None = None
+    code_block_wrap_long_lines: bool | None = None
 
 
 class VoiceAutoplayUpdate(BaseModel):
@@ -249,7 +289,9 @@ def load_ui_settings() -> dict[str, Any]:
         try:
             with open(settings_file, encoding="utf-8") as handle:
                 saved = json.load(handle)
-                merged = {**DEFAULT_UI_SETTINGS, **saved}
+                # resolve_languages owns the legacy migration (a file predating
+                # the UI/response split inherits its one language into both).
+                merged = {**DEFAULT_UI_SETTINGS, **saved, **resolve_languages(saved)}
                 # Filter persisted enabled_optional_tools to current
                 # toggleable set so retired tool names can't leak into
                 # the per-turn payload.
@@ -306,7 +348,41 @@ def _require_settings_admin() -> None:
         )
 
 
-def _provider_choices() -> dict[str, list[dict[str, str]]]:
+def _require_codex_oauth_actor() -> None:
+    """Gate the Codex OAuth lifecycle: personal, not administrative.
+
+    Every one of these endpoints acts on the *caller's own* credentials —
+    ``get_codex_oauth_service()`` resolves the store, the model catalog, and
+    the callback route from owner scope — so requiring an administrator was
+    what left ordinary users unable to use Codex at all: an owner-bound
+    profile is (correctly) never grantable, and they could not sign in for
+    themselves either (#781).
+
+    A partner is refused: it is a synthetic user whose owner is a real
+    account, so letting one in would mean acting on that person's login —
+    including signing them out. Partners inherit the owner's login at call
+    time and need no lifecycle of their own.
+    """
+    from deeptutor.services.partners.scope import is_partner_user_id
+
+    if is_partner_user_id(get_current_user().id):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="A partner uses the Codex login of the account that owns it.",
+        )
+
+
+def _codex_http_exception(error: CodexAuthError) -> HTTPException:
+    return HTTPException(
+        status_code=error.http_status,
+        detail={
+            "code": error.code,
+            "message": error.public_message,
+        },
+    )
+
+
+def _provider_choices() -> dict[str, list[dict[str, Any]]]:
     """Build dropdown options for provider selection, keyed by service type."""
     from deeptutor.services.config.provider_runtime import (
         EMBEDDING_PROVIDERS,
@@ -329,6 +405,7 @@ def _provider_choices() -> dict[str, list[dict[str, str]]]:
                     else s.label
                 ),
                 "base_url": s.default_api_base,
+                "auth_mode": s.auth_mode,
             }
             for s in PROVIDERS
         ],
@@ -481,6 +558,51 @@ async def get_settings():
         "catalog": get_model_catalog_service().load(),
         "providers": _provider_choices(),
     }
+
+
+@router.post("/providers/openai-codex/oauth/start")
+async def start_openai_codex_oauth() -> dict[str, Any]:
+    _require_codex_oauth_actor()
+    try:
+        return await get_codex_oauth_service().start_login()
+    except CodexAuthError as exc:
+        raise _codex_http_exception(exc) from None
+
+
+@router.get("/providers/openai-codex/oauth/status")
+async def get_openai_codex_oauth_status() -> dict[str, Any]:
+    _require_codex_oauth_actor()
+    try:
+        return get_codex_oauth_service().public_status()
+    except CodexAuthError as exc:
+        raise _codex_http_exception(exc) from None
+
+
+@router.post("/providers/openai-codex/oauth/cancel")
+async def cancel_openai_codex_oauth() -> dict[str, Any]:
+    _require_codex_oauth_actor()
+    try:
+        return await get_codex_oauth_service().cancel_login()
+    except CodexAuthError as exc:
+        raise _codex_http_exception(exc) from None
+
+
+@router.post("/providers/openai-codex/oauth/logout")
+async def logout_openai_codex_oauth() -> dict[str, Any]:
+    _require_codex_oauth_actor()
+    try:
+        return await get_codex_oauth_service().logout()
+    except CodexAuthError as exc:
+        raise _codex_http_exception(exc) from None
+
+
+@router.post("/providers/openai-codex/models/refresh")
+async def refresh_openai_codex_models() -> dict[str, Any]:
+    _require_codex_oauth_actor()
+    try:
+        return await get_codex_oauth_service().refresh_models()
+    except CodexAuthError as exc:
+        raise _codex_http_exception(exc) from None
 
 
 @router.get("/catalog")
@@ -1022,10 +1144,41 @@ async def update_chat_response_timeout(update: ChatResponseTimeoutUpdate):
     return {"chat_response_timeout": update.chat_response_timeout}
 
 
+# The UI preferences a page can need before it knows who is asking. All three
+# describe the person's own presentation and output choices; none of them say
+# anything about how the deployment is configured.
+PRESESSION_UI_FIELDS = ("theme", "language", "response_language")
+
+
+@public_router.get("/ui")
+async def get_ui_settings():
+    """Return the pre-session UI preferences: theme and the two languages.
+
+    Public by design, which is why it is a narrow projection rather than the
+    saved ``ui`` blob. The app shell — and the statically prerendered auth
+    pages, which have no session at all — adopt the persisted languages here
+    during bootstrap. Theme rides along so those pages can paint in the right
+    one instead of flashing.
+
+    Everything else under ``ui`` (sidebar_nav_order, enabled_optional_tools,
+    chat_response_timeout, …) describes what the deployment has turned on, so
+    it stays behind auth: read it from the ``ui`` key of GET /settings.
+    """
+    settings = load_ui_settings()
+    return {field: settings.get(field) for field in PRESESSION_UI_FIELDS}
+
+
 @router.put("/ui")
-async def update_ui_settings(update: UISettings):
+async def update_ui_settings(update: UISettingsUpdate):
+    """Merge frontend partial update into current UI settings.
+
+    Uses exclude_unset=True semantics so that only fields explicitly provided
+    by the frontend override saved values. Fields not in the frontend payload
+    (even if they equal the model defaults) are omitted from the merge.
+    """
     current_ui = load_ui_settings()
-    current_ui.update(update.model_dump(exclude_none=True))
+    dump = update.model_dump(exclude_unset=True)  # Only merge explicitly provided fields
+    current_ui.update(dump)
     save_ui_settings(current_ui)
     return current_ui
 

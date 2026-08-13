@@ -66,6 +66,10 @@ class ProviderSpec:
         return "standard"
 
     @property
+    def auth_mode(self) -> str:
+        return "oauth" if self.is_oauth else "api_key"
+
+    @property
     def label(self) -> str:
         return self.display_name or self.name.title()
 
@@ -88,6 +92,11 @@ PROVIDER_ALIASES = {
     "github-copilot": "github_copilot",
     "openai-codex": "openai_codex",
     "lm-studio": "lm_studio",
+    "atlas": "atlascloud",
+    "atlas_cloud": "atlascloud",
+    "atlas-cloud": "atlascloud",
+    "eden_ai": "edenai",
+    "novita_ai": "novita",
 }
 
 
@@ -146,6 +155,16 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         supports_prompt_caching=True,
     ),
     ProviderSpec(
+        name="edenai",
+        keywords=("edenai",),
+        env_key="EDENAI_API_KEY",
+        display_name="Eden AI",
+        backend="openai_compat",
+        is_gateway=True,
+        detect_by_base_keyword="edenai",
+        default_api_base="https://api.edenai.run/v3",
+    ),
+    ProviderSpec(
         name="aihubmix",
         keywords=("aihubmix",),
         env_key="OPENAI_API_KEY",
@@ -165,6 +184,26 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         is_gateway=True,
         detect_by_base_keyword="siliconflow",
         default_api_base="https://api.siliconflow.cn/v1",
+    ),
+    ProviderSpec(
+        name="novita",
+        keywords=("novita", "novita-ai", "novita ai"),
+        env_key="NOVITA_API_KEY",
+        display_name="Novita AI",
+        backend="openai_compat",
+        is_gateway=True,
+        detect_by_base_keyword="novita",
+        default_api_base="https://api.novita.ai/openai",
+    ),
+    ProviderSpec(
+        name="atlascloud",
+        keywords=("atlascloud", "atlas-cloud", "atlas cloud"),
+        env_key="ATLASCLOUD_API_KEY",
+        display_name="Atlas Cloud",
+        backend="openai_compat",
+        is_gateway=True,
+        detect_by_base_keyword="atlascloud",
+        default_api_base="https://api.atlascloud.ai/v1",
     ),
     ProviderSpec(
         name="volcengine",
@@ -236,7 +275,6 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         env_key="",
         display_name="OpenAI Codex",
         backend="openai_codex",
-        detect_by_base_keyword="codex",
         is_oauth=True,
         default_api_base="https://chatgpt.com/backend-api",
     ),
@@ -294,18 +332,28 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         display_name="Moonshot",
         backend="openai_compat",
         default_api_base="https://api.moonshot.cn/v1",
-        model_overrides=(
-            ("kimi-k2.5", {"temperature": 1.0}),
-            ("kimi-k2.6", {"temperature": 1.0}),
-        ),
+        # Kimi-branded models (k2.5, k2.6, k2.7-code, k3, …) lock temperature
+        # server-side: any value other than the model's fixed default is
+        # rejected with HTTP 400 ("invalid temperature: only 1 is allowed for
+        # this model"). Dropping the parameter (value None) lets the API apply
+        # the correct fixed value per model and per thinking/non-thinking mode —
+        # Moonshot's own recommendation. The tunable moonshot-v1-* series does
+        # not contain "kimi" and keeps the caller's temperature.
+        model_overrides=(("kimi", {"temperature": None}),),
     ),
+    # MiniMax runs two separate platforms: global (platform.minimax.io /
+    # api.minimax.io) and mainland China (platform.minimaxi.com /
+    # api.minimaxi.com). Keys are issued per platform and are NOT
+    # interchangeable. The global endpoint is the default here; China-platform
+    # users must override base_url to https://api.minimaxi.com/v1 (or
+    # https://api.minimaxi.com/anthropic) *and* use a China-platform key.
     ProviderSpec(
         name="minimax",
         keywords=("minimax",),
         env_key="MINIMAX_API_KEY",
         display_name="MiniMax",
         backend="openai_compat",
-        default_api_base="https://api.minimaxi.com/v1",
+        default_api_base="https://api.minimax.io/v1",
         thinking_style="reasoning_split",
     ),
     ProviderSpec(
@@ -314,7 +362,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         env_key="MINIMAX_API_KEY",
         display_name="MiniMax (Anthropic)",
         backend="anthropic",
-        default_api_base="https://api.minimaxi.com/anthropic",
+        default_api_base="https://api.minimax.io/anthropic",
     ),
     ProviderSpec(
         name="mistral",

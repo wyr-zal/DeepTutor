@@ -38,9 +38,16 @@ def test_sqlite_store_migrates_legacy_chat_history_db(tmp_path: Path) -> None:
         service._user_data_dir = tmp_path / "data" / "user"
         legacy_db = tmp_path / "data" / "chat_history.db"
         legacy_db.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(legacy_db) as conn:
+        conn = sqlite3.connect(legacy_db)
+        try:
             conn.execute("CREATE TABLE legacy (id INTEGER PRIMARY KEY)")
             conn.commit()
+        finally:
+            # ``Connection.__exit__`` commits/rolls back but does not close the
+            # handle.  Explicitly close it so the legacy-file migration is
+            # exercised on Windows too, where an open SQLite handle prevents
+            # ``os.replace`` from moving the database.
+            conn.close()
 
         store = SQLiteSessionStore()
 
@@ -74,6 +81,46 @@ def _make_items(*specs):
             }
         )
     return items
+
+
+def test_session_sync_returns_snapshot_then_only_changes(
+    store: SQLiteSessionStore,
+) -> None:
+    first = asyncio.run(store.create_session(title="First"))
+    second = asyncio.run(store.create_session(title="Second"))
+
+    snapshot = asyncio.run(store.sync_sessions())
+
+    assert snapshot["cursor"] >= 2
+    assert {item["session_id"] for item in snapshot["sessions"]} == {
+        first["id"],
+        second["id"],
+    }
+    assert snapshot["deleted_session_ids"] == []
+    assert snapshot["has_more"] is False
+
+    asyncio.run(store.update_session_title(first["id"], "Renamed"))
+    asyncio.run(store.delete_session(second["id"]))
+    delta = asyncio.run(store.sync_sessions(cursor=snapshot["cursor"]))
+
+    assert delta["cursor"] > snapshot["cursor"]
+    assert [item["session_id"] for item in delta["sessions"]] == [first["id"]]
+    assert delta["sessions"][0]["title"] == "Renamed"
+    assert delta["deleted_session_ids"] == [second["id"]]
+
+
+def test_session_sync_coalesces_multiple_changes_and_paginates(
+    store: SQLiteSessionStore,
+) -> None:
+    session = asyncio.run(store.create_session(title="Start"))
+    cursor = asyncio.run(store.sync_sessions())["cursor"]
+    asyncio.run(store.update_session_title(session["id"], "Middle"))
+    asyncio.run(store.update_session_title(session["id"], "Latest"))
+
+    first_page = asyncio.run(store.sync_sessions(cursor=cursor, limit=1))
+    assert first_page["has_more"] is True
+    second_page = asyncio.run(store.sync_sessions(cursor=first_page["cursor"], limit=200))
+    assert second_page["sessions"][0]["title"] == "Latest"
 
 
 # ── Notebook entries ──────────────────────────────────────────────

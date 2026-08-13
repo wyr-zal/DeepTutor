@@ -4,9 +4,15 @@ export type AppLanguage = "en" | "zh";
 
 export const ACTIVE_SESSION_STORAGE_KEY = "deeptutor.activeSessionId.tab";
 export const LANGUAGE_STORAGE_KEY = "deeptutor-language";
+export const RESPONSE_LANGUAGE_STORAGE_KEY = "deeptutor-response-language";
 export const SIDEBAR_COLLAPSED_STORAGE_KEY = "deeptutor.sidebarCollapsed";
 export const CHAT_RESPONSE_TIMEOUT_STORAGE_KEY =
   "deeptutor.chatResponseTimeout";
+export const CODE_BLOCK_THEME_STORAGE_KEY = "deeptutor.code-block-theme";
+export const CODE_BLOCK_SHOW_LINE_NUMBERS_STORAGE_KEY =
+  "deeptutor.code-block-show-line-numbers";
+export const CODE_BLOCK_WRAP_LONG_LINES_STORAGE_KEY =
+  "deeptutor.code-block-wrap-long-lines";
 
 // Mirror of the per-user ``chat_response_timeout`` UI preference. Cached in
 // localStorage so the chat watchdog (a separate provider from Settings) can
@@ -51,12 +57,23 @@ export function writeStoredChatResponseTimeout(seconds: number): void {
 
 export const ACTIVE_SESSION_EVENT = "deeptutor:active-session";
 export const LANGUAGE_EVENT = "deeptutor:language";
+export const RESPONSE_LANGUAGE_EVENT = "deeptutor:response-language";
 export const SIDEBAR_COLLAPSED_EVENT = "deeptutor:sidebar-collapsed";
+export const CODE_BLOCK_SETTINGS_EVENT = "deeptutor:code-block-settings";
 
 export function normalizeLanguage(
   value: string | null | undefined,
 ): AppLanguage {
   return value === "zh" ? "zh" : "en";
+}
+
+export function resolveResponseLanguage(
+  value: string | null | undefined,
+  legacyLanguage: string | null | undefined = "en",
+): AppLanguage {
+  return value === "zh" || value === "en"
+    ? value
+    : normalizeLanguage(legacyLanguage);
 }
 
 export function readStoredLanguage(): AppLanguage {
@@ -68,12 +85,54 @@ export function readStoredLanguage(): AppLanguage {
   }
 }
 
+/** Whether this browser has ever recorded a choice.
+ *
+ * ``readStoredLanguage`` cannot answer this: it normalizes a missing value to
+ * "en", which is indistinguishable from an explicit English selection. The
+ * bootstrap needs the difference — it may only consult the server-side
+ * preference when the browser has no choice of its own to honour.
+ */
+export function hasStoredLanguage(): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    return window.localStorage.getItem(LANGUAGE_STORAGE_KEY) !== null;
+  } catch {
+    return false;
+  }
+}
+
 export function writeStoredLanguage(language: AppLanguage): void {
   if (typeof window === "undefined") return;
   try {
     window.localStorage.setItem(LANGUAGE_STORAGE_KEY, language);
     window.dispatchEvent(
       new CustomEvent(LANGUAGE_EVENT, {
+        detail: { language },
+      }),
+    );
+  } catch {
+    // localStorage may be unavailable
+  }
+}
+
+export function readStoredResponseLanguage(): AppLanguage {
+  if (typeof window === "undefined") return "en";
+  try {
+    return resolveResponseLanguage(
+      window.localStorage.getItem(RESPONSE_LANGUAGE_STORAGE_KEY),
+      window.localStorage.getItem(LANGUAGE_STORAGE_KEY),
+    );
+  } catch {
+    return "en";
+  }
+}
+
+export function writeStoredResponseLanguage(language: AppLanguage): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(RESPONSE_LANGUAGE_STORAGE_KEY, language);
+    window.dispatchEvent(
+      new CustomEvent(RESPONSE_LANGUAGE_EVENT, {
         detail: { language },
       }),
     );
@@ -128,6 +187,120 @@ export function writeStoredSidebarCollapsed(collapsed: boolean): void {
     window.dispatchEvent(
       new CustomEvent(SIDEBAR_COLLAPSED_EVENT, {
         detail: { collapsed },
+      }),
+    );
+  } catch {
+    // localStorage may be unavailable
+  }
+}
+
+// Code block settings defaults
+export const DEFAULT_CODE_BLOCK_THEME = "oneDark";
+export const DEFAULT_CODE_BLOCK_SHOW_LINE_NUMBERS = false;
+export const DEFAULT_CODE_BLOCK_WRAP_LONG_LINES = false;
+
+export function normalizeCodeBlockTheme(
+  value: string | null | undefined,
+): string {
+  if (!value || value.trim() === "") return DEFAULT_CODE_BLOCK_THEME;
+  return value.trim();
+}
+
+export function readStoredCodeBlockTheme(): string {
+  if (typeof window === "undefined") return DEFAULT_CODE_BLOCK_THEME;
+  try {
+    const raw = window.localStorage.getItem(CODE_BLOCK_THEME_STORAGE_KEY);
+    return normalizeCodeBlockTheme(raw);
+  } catch {
+    return DEFAULT_CODE_BLOCK_THEME;
+  }
+}
+
+export function writeStoredCodeBlockTheme(theme: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      CODE_BLOCK_THEME_STORAGE_KEY,
+      normalizeCodeBlockTheme(theme),
+    );
+    window.dispatchEvent(
+      new CustomEvent(CODE_BLOCK_SETTINGS_EVENT, {
+        detail: { codeBlockTheme: normalizeCodeBlockTheme(theme) },
+      }),
+    );
+  } catch {
+    // localStorage may be unavailable
+  }
+}
+
+export function normalizeCodeBlockShowLineNumbers(
+  value: string | null | undefined,
+): boolean {
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return DEFAULT_CODE_BLOCK_SHOW_LINE_NUMBERS;
+}
+
+export function readStoredCodeBlockShowLineNumbers(): boolean {
+  if (typeof window === "undefined")
+    return DEFAULT_CODE_BLOCK_SHOW_LINE_NUMBERS;
+  try {
+    const raw = window.localStorage.getItem(
+      CODE_BLOCK_SHOW_LINE_NUMBERS_STORAGE_KEY,
+    );
+    return normalizeCodeBlockShowLineNumbers(raw);
+  } catch {
+    return DEFAULT_CODE_BLOCK_SHOW_LINE_NUMBERS;
+  }
+}
+
+export function writeStoredCodeBlockShowLineNumbers(show: boolean): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      CODE_BLOCK_SHOW_LINE_NUMBERS_STORAGE_KEY,
+      String(show),
+    );
+    window.dispatchEvent(
+      new CustomEvent(CODE_BLOCK_SETTINGS_EVENT, {
+        detail: { codeBlockShowLineNumbers: show },
+      }),
+    );
+  } catch {
+    // localStorage may be unavailable
+  }
+}
+
+export function normalizeCodeBlockWrapLongLines(
+  value: string | null | undefined,
+): boolean {
+  if (value === "true") return true;
+  if (value === "false") return false;
+  return DEFAULT_CODE_BLOCK_WRAP_LONG_LINES;
+}
+
+export function readStoredCodeBlockWrapLongLines(): boolean {
+  if (typeof window === "undefined") return DEFAULT_CODE_BLOCK_WRAP_LONG_LINES;
+  try {
+    const raw = window.localStorage.getItem(
+      CODE_BLOCK_WRAP_LONG_LINES_STORAGE_KEY,
+    );
+    return normalizeCodeBlockWrapLongLines(raw);
+  } catch {
+    return DEFAULT_CODE_BLOCK_WRAP_LONG_LINES;
+  }
+}
+
+export function writeStoredCodeBlockWrapLongLines(wrap: boolean): void {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      CODE_BLOCK_WRAP_LONG_LINES_STORAGE_KEY,
+      String(wrap),
+    );
+    window.dispatchEvent(
+      new CustomEvent(CODE_BLOCK_SETTINGS_EVENT, {
+        detail: { codeBlockWrapLongLines: wrap },
       }),
     );
   } catch {

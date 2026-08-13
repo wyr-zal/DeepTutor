@@ -114,6 +114,159 @@ def test_llm_api_base_keyword_gateway() -> None:
     assert resolved.extra_headers == {"APP-Code": "x"}
 
 
+def test_llm_atlascloud_binding_uses_default_openai_compatible_endpoint() -> None:
+    catalog = _build_catalog(
+        llm_profile={
+            "id": "llm-p",
+            "name": "Atlas Cloud",
+            "binding": "atlascloud",
+            "base_url": "",
+            "api_key": "atlas-key",
+            "api_version": "",
+            "extra_headers": {},
+            "models": [
+                {
+                    "id": "llm-m",
+                    "name": "Qwen 3.5 Flash",
+                    "model": "qwen/qwen3.5-flash",
+                }
+            ],
+        }
+    )
+
+    resolved = resolve_llm_runtime_config(catalog=catalog)
+
+    assert resolved.provider_name == "atlascloud"
+    assert resolved.provider_mode == "gateway"
+    assert resolved.binding == "atlascloud"
+    assert resolved.model == "qwen/qwen3.5-flash"
+    assert resolved.api_key == "atlas-key"
+    assert resolved.effective_url == "https://api.atlascloud.ai/v1"
+
+
+def test_llm_atlascloud_base_url_detection_preserves_openai_binding_compatibility() -> None:
+    catalog = _build_catalog(
+        llm_profile={
+            "id": "llm-p",
+            "name": "OpenAI Compatible",
+            "binding": "openai",
+            "base_url": "https://api.atlascloud.ai/v1",
+            "api_key": "atlas-key",
+            "api_version": "",
+            "extra_headers": {},
+            "models": [{"id": "llm-m", "name": "Qwen", "model": "qwen/qwen3.5-flash"}],
+        }
+    )
+
+    resolved = resolve_llm_runtime_config(catalog=catalog)
+
+    assert resolved.provider_name == "atlascloud"
+    assert resolved.provider_mode == "gateway"
+    assert resolved.effective_url == "https://api.atlascloud.ai/v1"
+
+
+def test_llm_novita_binding_uses_default_openai_compatible_endpoint() -> None:
+    catalog = _build_catalog(
+        llm_profile={
+            "id": "llm-p",
+            "name": "Novita AI",
+            "binding": "novita",
+            "base_url": "",
+            "api_key": "novita-key",
+            "api_version": "",
+            "extra_headers": {},
+            "models": [
+                {
+                    "id": "llm-m",
+                    "name": "DeepSeek V3.2",
+                    "model": "deepseek/deepseek-v3.2",
+                }
+            ],
+        }
+    )
+
+    resolved = resolve_llm_runtime_config(catalog=catalog)
+
+    assert resolved.provider_name == "novita"
+    assert resolved.provider_mode == "gateway"
+    assert resolved.binding == "novita"
+    assert resolved.model == "deepseek/deepseek-v3.2"
+    assert resolved.api_key == "novita-key"
+    assert resolved.effective_url == "https://api.novita.ai/openai"
+
+
+def test_llm_novita_base_url_detection_preserves_openai_binding_compatibility() -> None:
+    catalog = _build_catalog(
+        llm_profile={
+            "id": "llm-p",
+            "name": "OpenAI Compatible",
+            "binding": "openai",
+            "base_url": "https://api.novita.ai/openai",
+            "api_key": "novita-key",
+            "api_version": "",
+            "extra_headers": {},
+            "models": [{"id": "llm-m", "name": "DeepSeek", "model": "deepseek/deepseek-v3.2"}],
+        }
+    )
+
+    resolved = resolve_llm_runtime_config(catalog=catalog)
+
+    assert resolved.provider_name == "novita"
+    assert resolved.provider_mode == "gateway"
+    assert resolved.effective_url == "https://api.novita.ai/openai"
+
+
+def test_llm_edenai_binding_uses_default_openai_compatible_endpoint() -> None:
+    catalog = _build_catalog(
+        llm_profile={
+            "id": "llm-p",
+            "name": "Eden AI",
+            "binding": "edenai",
+            "base_url": "",
+            "api_key": "eden-key",
+            "api_version": "",
+            "extra_headers": {},
+            "models": [
+                {
+                    "id": "llm-m",
+                    "name": "Mistral Large",
+                    "model": "mistral/mistral-large-latest",
+                }
+            ],
+        }
+    )
+
+    resolved = resolve_llm_runtime_config(catalog=catalog)
+
+    assert resolved.provider_name == "edenai"
+    assert resolved.provider_mode == "gateway"
+    assert resolved.binding == "edenai"
+    assert resolved.model == "mistral/mistral-large-latest"
+    assert resolved.api_key == "eden-key"
+    assert resolved.effective_url == "https://api.edenai.run/v3"
+
+
+def test_llm_edenai_base_url_detection_preserves_openai_binding_compatibility() -> None:
+    catalog = _build_catalog(
+        llm_profile={
+            "id": "llm-p",
+            "name": "OpenAI Compatible",
+            "binding": "openai",
+            "base_url": "https://api.edenai.run/v3",
+            "api_key": "eden-key",
+            "api_version": "",
+            "extra_headers": {},
+            "models": [{"id": "llm-m", "name": "GPT", "model": "openai/gpt-5.5"}],
+        }
+    )
+
+    resolved = resolve_llm_runtime_config(catalog=catalog)
+
+    assert resolved.provider_name == "edenai"
+    assert resolved.provider_mode == "gateway"
+    assert resolved.effective_url == "https://api.edenai.run/v3"
+
+
 def test_llm_local_fallback() -> None:
     catalog = _build_catalog(
         llm_profile={
@@ -133,7 +286,7 @@ def test_llm_local_fallback() -> None:
     assert resolved.api_key == "sk-no-key-required"
 
 
-def test_llm_minimax_binding_uses_minimaxi_endpoint() -> None:
+def test_llm_minimax_binding_uses_global_endpoint() -> None:
     catalog = _build_catalog(
         llm_profile={
             "id": "llm-p",
@@ -149,7 +302,7 @@ def test_llm_minimax_binding_uses_minimaxi_endpoint() -> None:
     resolved = resolve_llm_runtime_config(catalog=catalog)
     assert resolved.provider_name == "minimax"
     assert resolved.provider_mode == "standard"
-    assert resolved.effective_url == "https://api.minimaxi.com/v1"
+    assert resolved.effective_url == "https://api.minimax.io/v1"
 
 
 def test_llm_minimax_anthropic_binding_uses_anthropic_endpoint() -> None:
@@ -168,7 +321,7 @@ def test_llm_minimax_anthropic_binding_uses_anthropic_endpoint() -> None:
     resolved = resolve_llm_runtime_config(catalog=catalog)
     assert resolved.provider_name == "minimax_anthropic"
     assert resolved.provider_mode == "standard"
-    assert resolved.effective_url == "https://api.minimaxi.com/anthropic"
+    assert resolved.effective_url == "https://api.minimax.io/anthropic"
 
 
 def test_llm_custom_anthropic_binding_stays_direct() -> None:
