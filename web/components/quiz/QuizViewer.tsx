@@ -222,6 +222,7 @@ export default function QuizViewer({
   const [answerViews, setAnswerViews] = useState<Record<number, AnswerView>>(
     {},
   );
+  const lookupCacheRef = useRef<Set<string>>(new Set());
   // Per-question collapsed state for the Reference / Judgment review
   // block. Default: expanded. Persists per question while the QuizViewer
   // instance is alive.
@@ -266,6 +267,9 @@ export default function QuizViewer({
       // resolve against another turn's rows (question ids are positional),
       // which is exactly the cross-quiz answer inheritance of #677.
       if (!turnId) return;
+      const lookupKey = `${sId}::${turnId}::${qKey}`;
+      if (lookupCacheRef.current.has(lookupKey)) return;
+      lookupCacheRef.current.add(lookupKey);
       try {
         const entry = await lookupNotebookEntry(sId, qKey, turnId);
         if (entry) {
@@ -328,6 +332,7 @@ export default function QuizViewer({
           }
         }
       } catch {
+        lookupCacheRef.current.delete(lookupKey);
         /* entry may not exist yet */
       }
     },
