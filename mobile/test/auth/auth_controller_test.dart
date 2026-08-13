@@ -2,9 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:deeptutor_mobile/api/api_client.dart';
-import 'package:deeptutor_mobile/config/app_config.dart';
 import 'package:deeptutor_mobile/features/auth/auth_controller.dart';
-import 'package:deeptutor_mobile/features/auth/server_connection_controller.dart';
 import 'package:deeptutor_mobile/services/auth_store.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -109,85 +107,6 @@ class ExpiringSessionAdapter implements HttpClientAdapter {
 }
 
 void main() {
-  test('personal fixed server bootstraps a local session without probing',
-      () async {
-    final storage = MemorySecureStore();
-    final store = AuthStore(storage);
-    final adapter = JsonAdapter(<String, Map<String, dynamic>>{});
-    final client = ApiClient(
-      authStore: store,
-      dio: Dio()..httpClientAdapter = adapter,
-    );
-    final container = ProviderContainer(
-      overrides: [
-        secureKeyValueStoreProvider.overrideWithValue(storage),
-        apiClientProvider.overrideWithValue(client),
-        appConnectionConfigProvider.overrideWithValue(
-          const AppConnectionConfig(
-            fixedServerUrl: 'https://deeptutor.cliproxy.com.cn/',
-            personalServerMode: true,
-          ),
-        ),
-      ],
-    );
-    addTearDown(() {
-      container.dispose();
-      client.dispose();
-    });
-
-    await container.read(authControllerProvider.notifier).bootstrap();
-
-    final session = container.read(authControllerProvider).requireValue;
-    expect(session?.baseUrl, 'https://deeptutor.cliproxy.com.cn');
-    expect(session?.authEnabled, isFalse);
-    expect(session?.user.id, 'local-admin');
-    expect(await store.readBaseUrl(), 'https://deeptutor.cliproxy.com.cn');
-    expect(adapter.requests, isEmpty);
-  });
-
-  test('personal fixed server reports auth-enabled deployments in health state',
-      () async {
-    final storage = MemorySecureStore();
-    final store = AuthStore(storage);
-    final adapter = JsonAdapter(<String, Map<String, dynamic>>{
-      'GET /api/v1/auth/status': <String, dynamic>{
-        'enabled': true,
-        'authenticated': false,
-      },
-    });
-    final client = ApiClient(
-      authStore: store,
-      dio: Dio()..httpClientAdapter = adapter,
-    );
-    final container = ProviderContainer(
-      overrides: [
-        secureKeyValueStoreProvider.overrideWithValue(storage),
-        apiClientProvider.overrideWithValue(client),
-        appConnectionConfigProvider.overrideWithValue(
-          const AppConnectionConfig(
-            fixedServerUrl: 'https://deeptutor.cliproxy.com.cn',
-            personalServerMode: true,
-          ),
-        ),
-      ],
-    );
-    addTearDown(() {
-      container.dispose();
-      client.dispose();
-    });
-
-    await container.read(authControllerProvider.notifier).bootstrap();
-    final connection =
-        await container.read(serverConnectionControllerProvider.future);
-
-    final state = container.read(authControllerProvider);
-    expect(state.requireValue?.baseUrl, 'https://deeptutor.cliproxy.com.cn');
-    expect(state.requireValue?.authEnabled, isFalse);
-    expect(connection.status, ServerConnectionStatus.authMisconfigured);
-    expect(connection.message, contains('auth.enabled=false'));
-    expect(await store.readAccessToken(), isNull);
-  });
-
   test('auth-disabled bootstrap creates a durable no-token session', () async {
     final storage = MemorySecureStore();
     final store = AuthStore(storage);
@@ -223,6 +142,77 @@ void main() {
     expect(session?.authEnabled, isFalse);
     expect(session?.hasAccessToken, isFalse);
     expect((await store.readSession())?.user.username, 'local');
+  });
+
+  test('connecting to an auth-disabled server creates a local session',
+      () async {
+    final storage = MemorySecureStore();
+    final store = AuthStore(storage);
+    final adapter = JsonAdapter(<String, Map<String, dynamic>>{
+      'GET /api/v1/auth/status': <String, dynamic>{
+        'enabled': false,
+        'authenticated': true,
+        'username': 'local',
+      },
+    });
+    final client = ApiClient(
+      authStore: store,
+      dio: Dio()..httpClientAdapter = adapter,
+    );
+    final container = ProviderContainer(
+      overrides: [
+        secureKeyValueStoreProvider.overrideWithValue(storage),
+        apiClientProvider.overrideWithValue(client),
+      ],
+    );
+    addTearDown(() {
+      container.dispose();
+      client.dispose();
+    });
+
+    final status = await container
+        .read(authControllerProvider.notifier)
+        .connectToServer(baseUrl: 'http://10.0.2.2:8001');
+
+    expect(status.enabled, isFalse);
+    expect(container.read(authControllerProvider).requireValue?.authEnabled,
+        isFalse);
+    expect((await store.readSession())?.baseUrl, 'http://10.0.2.2:8001');
+    expect(adapter.requests, hasLength(1));
+  });
+
+  test('connecting to an authenticated server waits for credentials', () async {
+    final storage = MemorySecureStore();
+    final store = AuthStore(storage);
+    final adapter = JsonAdapter(<String, Map<String, dynamic>>{
+      'GET /api/v1/auth/status': <String, dynamic>{
+        'enabled': true,
+        'authenticated': false,
+      },
+    });
+    final client = ApiClient(
+      authStore: store,
+      dio: Dio()..httpClientAdapter = adapter,
+    );
+    final container = ProviderContainer(
+      overrides: [
+        secureKeyValueStoreProvider.overrideWithValue(storage),
+        apiClientProvider.overrideWithValue(client),
+      ],
+    );
+    addTearDown(() {
+      container.dispose();
+      client.dispose();
+    });
+
+    final status = await container
+        .read(authControllerProvider.notifier)
+        .connectToServer(baseUrl: 'https://tutor.example.com');
+
+    expect(status.enabled, isTrue);
+    expect(container.read(authControllerProvider).requireValue, isNull);
+    expect(await store.readBaseUrl(), 'https://tutor.example.com');
+    expect(await store.readAccessToken(), isNull);
   });
 
   test(

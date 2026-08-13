@@ -60,6 +60,61 @@ class QuizQuestion {
         'difficulty': difficulty,
       };
 
+  /// Whether this is a single-choice question with usable options.
+  bool get isMultipleChoice => questionType == 'choice' && options.isNotEmpty;
+
+  /// Types the client can grade locally without an AI judge: choice, concept
+  /// (true/false) and fill_in_blank — mirrors the web `isAutoGradable`.
+  bool get isAutoGradable =>
+      isMultipleChoice ||
+      questionType == 'concept' ||
+      questionType == 'fill_in_blank';
+
+  /// Resolve the canonical option key ("A"/"B"/…) for [correctAnswer],
+  /// tolerating an answer given either as the key or as the option text.
+  String get correctChoiceKey {
+    final correct = correctAnswer.trim();
+    if (correct.isEmpty || options.isEmpty) return '';
+    final direct = correct.toUpperCase();
+    if (options.containsKey(direct)) return direct;
+    final lowerAnswer = correct.toLowerCase();
+    for (final entry in options.entries) {
+      if (entry.value.trim().toLowerCase() == lowerAnswer) {
+        return entry.key.toUpperCase();
+      }
+    }
+    // Fall back to the leading letter (e.g. "B. foo" -> "B").
+    return correct.substring(0, 1).toUpperCase();
+  }
+
+  /// Canonical "true"/"false" answer for concept questions, or '' if unknown.
+  String get correctConceptAnswer {
+    final normalized = correctAnswer.trim().toLowerCase();
+    if (normalized == 'true') return 'true';
+    if (normalized == 'false') return 'false';
+    return '';
+  }
+
+  /// Local pass/fail check for auto-gradable types. [selected] carries the
+  /// option key or "true"/"false"; [typed] carries free-text answers.
+  bool isAnswerCorrectLocally({String selected = '', String typed = ''}) {
+    final correct = correctAnswer.trim();
+    if (isMultipleChoice) {
+      final user = selected.trim().toUpperCase();
+      if (user.isEmpty) return false;
+      return user == correctChoiceKey ||
+          user == correct.toUpperCase() ||
+          (correct.isNotEmpty && user == correct.substring(0, 1).toUpperCase());
+    }
+    if (questionType == 'concept') {
+      final user = selected.trim().toLowerCase();
+      return user.isNotEmpty && user == correctConceptAnswer;
+    }
+    // fill_in_blank
+    final user = typed.trim();
+    return user.isNotEmpty && user.toLowerCase() == correct.toLowerCase();
+  }
+
   static String _answer(Object? value) {
     if (value is Iterable) {
       return value.map((item) => item.toString()).join(', ');

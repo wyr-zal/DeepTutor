@@ -316,7 +316,7 @@ function AssistantThreadMessage({
   onSubmitUserReply: (reply: {
     text?: string;
     answers?: Array<{ questionId: string; text: string }>;
-  }) => void;
+  }) => boolean;
 }) {
   const segments = useMemo(
     () => extractMessageSegments(message.events),

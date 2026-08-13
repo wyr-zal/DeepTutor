@@ -1,7 +1,8 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_markdown/flutter_markdown.dart';
 
+import '../app/theme.dart';
 import '../models/judge_result.dart';
+import 'rich_markdown.dart';
 
 class StreamingText extends StatelessWidget {
   const StreamingText({
@@ -9,20 +10,28 @@ class StreamingText extends StatelessWidget {
     required this.text,
     this.isStreaming = false,
     this.result,
+    this.emptyStreamingText = '正在等待 AI 返回评判…',
+    this.emptyText = '尚未生成评判。',
+    this.streamingSemanticsLabel = 'AI 评判正在生成',
+    this.completedSemanticsLabel = 'AI 评判结果',
   });
 
   final String text;
   final bool isStreaming;
   final JudgeResult? result;
+  final String emptyStreamingText;
+  final String emptyText;
+  final String streamingSemanticsLabel;
+  final String completedSemanticsLabel;
 
   @override
   Widget build(BuildContext context) {
     final displayText = text.trim().isEmpty
-        ? (isStreaming ? '正在等待 AI 返回评判…' : '尚未生成评判。')
+        ? (isStreaming ? emptyStreamingText : emptyText)
         : text;
     return Semantics(
       liveRegion: true,
-      label: isStreaming ? 'AI 评判正在生成' : 'AI 评判结果',
+      label: isStreaming ? streamingSemanticsLabel : completedSemanticsLabel,
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: <Widget>[
@@ -30,11 +39,11 @@ class StreamingText extends StatelessWidget {
             Align(child: _VerdictChip(verdict: result!.verdict)),
             const SizedBox(height: 8),
           ],
-          MarkdownBody(
-            data: displayText,
-            selectable: true,
-            softLineBreak: true,
-          ),
+          if (displayText.isNotEmpty)
+            RichMarkdown(
+              displayText,
+              selectable: true,
+            ),
           if (isStreaming) ...<Widget>[
             const SizedBox(height: 12),
             const LinearProgressIndicator(),
@@ -52,15 +61,55 @@ class _VerdictChip extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final (icon, label) = switch (verdict) {
-      JudgeVerdict.correct => (Icons.check_circle_outline, '推断状态：正确'),
+    final semantic = AppSemanticColors.of(context);
+    final colors = Theme.of(context).colorScheme;
+    final (icon, label, bg, fg) = switch (verdict) {
+      JudgeVerdict.correct => (
+          Icons.check,
+          '正确',
+          semantic.successBg,
+          semantic.successFg,
+        ),
       JudgeVerdict.partiallyCorrect => (
           Icons.warning_amber_rounded,
-          '推断状态：部分正确',
+          '部分正确',
+          semantic.warningBg,
+          semantic.warningFg,
         ),
-      JudgeVerdict.incorrect => (Icons.cancel_outlined, '推断状态：不正确'),
-      JudgeVerdict.unknown => (Icons.help_outline, '未从返回文字识别判定状态'),
+      JudgeVerdict.incorrect => (
+          Icons.close,
+          '不正确',
+          semantic.dangerBg,
+          semantic.dangerFg,
+        ),
+      JudgeVerdict.unknown => (
+          Icons.help_outline,
+          '未识别',
+          colors.surfaceContainerHighest,
+          colors.onSurfaceVariant,
+        ),
     };
-    return Chip(avatar: Icon(icon, size: 18), label: Text(label));
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: bg,
+        borderRadius: BorderRadius.circular(6),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Icon(icon, size: 13, color: fg),
+          const SizedBox(width: 4),
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w600,
+              color: fg,
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }

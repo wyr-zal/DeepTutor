@@ -76,3 +76,17 @@ test("hasPendingAskUserInMessages ignores ask_user cards from other turns", () =
 
   assert.equal(hasPendingAskUserInMessages(messages, "turn-1"), false);
 });
+
+test("ask_user submission rejection does not resolve a pending card", () => {
+  const events = [
+    event("tool_result", {
+      tool_call_id: "call-1",
+      tool_metadata: {
+        ask_user: { questions: [{ id: "scope", prompt: "What scope?" }] },
+      },
+    }),
+    event("error", { ask_user_submission_rejected: true }),
+  ];
+
+  assert.equal(hasPendingAskUser(events, "turn-1"), true);
+});

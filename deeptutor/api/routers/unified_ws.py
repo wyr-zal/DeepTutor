@@ -254,6 +254,8 @@ async def unified_websocket(ws: WebSocket) -> None:
                         {
                             "type": "error",
                             "content": (f"Turn {turn_id} is not awaiting a user reply."),
+                            "metadata": {"ask_user_submission_rejected": True},
+                            "turn_id": turn_id,
                         }
                     )
                 continue

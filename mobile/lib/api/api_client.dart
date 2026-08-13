@@ -100,6 +100,34 @@ class ApiClient {
     );
   }
 
+  Future<Response<T>> patch<T>(
+    String baseUrl,
+    String path, {
+    Object? data,
+    Map<String, dynamic>? queryParameters,
+    Options? options,
+  }) {
+    return _dio.patchUri<T>(
+      _withQuery(resolveServerUri(baseUrl, path), queryParameters),
+      data: data,
+      options: options,
+    );
+  }
+
+  Future<Response<T>> delete<T>(
+    String baseUrl,
+    String path, {
+    Object? data,
+    Map<String, dynamic>? queryParameters,
+    Options? options,
+  }) {
+    return _dio.deleteUri<T>(
+      _withQuery(resolveServerUri(baseUrl, path), queryParameters),
+      data: data,
+      options: options,
+    );
+  }
+
   static Uri _withQuery(
     Uri uri,
     Map<String, dynamic>? queryParameters,

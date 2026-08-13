@@ -9,6 +9,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 class _RecordingAdapter implements HttpClientAdapter {
   RequestOptions? request;
+  String responseBody = '{"sessions":[]}';
 
   @override
   Future<ResponseBody> fetch(
@@ -18,7 +19,7 @@ class _RecordingAdapter implements HttpClientAdapter {
   ) async {
     request = options;
     return ResponseBody.fromString(
-      '{"sessions":[]}',
+      responseBody,
       200,
       headers: <String, List<String>>{
         Headers.contentTypeHeader: <String>['application/json'],
@@ -128,6 +129,100 @@ void main() {
       adapter.request?.uri.toString(),
       'https://tutor.example.com/deeptutor/api/v1/sessions?limit=12&offset=3',
     );
+    client.dispose();
+  });
+
+  test('parses session detail messages and persisted event metadata', () async {
+    final api = SessionApi(
+      loadJson: (path, {queryParameters}) async {
+        expect(path, '/api/v1/sessions/session-1');
+        return <String, Object?>{
+          'session_id': 'session-1',
+          'title': '函数复习',
+          'messages': <Object?>[
+            <String, Object?>{
+              'id': 1,
+              'role': 'assistant',
+              'content': '题目如下',
+              'capability': 'deep_question',
+              'metadata': <String, Object?>{'branch': 'main'},
+              'events': <Object?>[
+                <String, Object?>{
+                  'type': 'content',
+                  'metadata': <String, Object?>{
+                    'call_kind': 'quiz_question_emitted',
+                  },
+                },
+              ],
+            },
+          ],
+        };
+      },
+    );
+
+    final detail = await api.getSession('session-1');
+
+    expect(detail.title, '函数复习');
+    expect(detail.messages.single.id, '1');
+    expect(detail.messages.single.capability, 'deep_question');
+    expect(detail.messages.single.events.single['type'], 'content');
+  });
+
+  test('rename and delete use PATCH/DELETE with strict paths', () async {
+    final writes = <Map<String, Object?>>[];
+    final api = SessionApi(
+      loadJson: (_, {queryParameters}) async => <String, Object?>{
+        'sessions': <Object?>[],
+      },
+      writeJson: (method, path, {data}) async {
+        writes.add(<String, Object?>{
+          'method': method,
+          'path': path,
+          'data': data,
+        });
+        return <String, Object?>{};
+      },
+    );
+
+    await api.renameSession('session-1', '  新标题  ');
+    await api.deleteSession('session-1');
+
+    expect(writes, <Map<String, Object?>>[
+      <String, Object?>{
+        'method': 'PATCH',
+        'path': '/api/v1/sessions/session-1',
+        'data': <String, Object?>{'title': '新标题'},
+      },
+      <String, Object?>{
+        'method': 'DELETE',
+        'path': '/api/v1/sessions/session-1',
+        'data': null,
+      },
+    ]);
+  });
+
+  test('fromApiClient sends PATCH and DELETE through the authenticated client',
+      () async {
+    final adapter = _RecordingAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+    final client = ApiClient(
+      authStore: AuthStore(_EmptySecureStore()),
+      dio: dio,
+    );
+    final api = SessionApi.fromApiClient(
+      client,
+      baseUrl: 'https://tutor.example.com/deeptutor',
+    );
+
+    await api.renameSession('session-1', '标题');
+    expect(adapter.request?.method, 'PATCH');
+    expect(
+      adapter.request?.uri.toString(),
+      'https://tutor.example.com/deeptutor/api/v1/sessions/session-1',
+    );
+
+    await api.deleteSession('session-1');
+    expect(adapter.request?.method, 'DELETE');
     client.dispose();
   });
 }

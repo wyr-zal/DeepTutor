@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'server_url.dart';
@@ -5,23 +6,27 @@ import 'server_url.dart';
 class AppConnectionConfig {
   const AppConnectionConfig({
     required this.fixedServerUrl,
-    required this.personalServerMode,
     this.diagnosticsEnabled = false,
+    this.manualServerEntryEnabled = kDebugMode,
   });
 
   factory AppConnectionConfig.fromEnvironment() {
-    return const AppConnectionConfig(
-      fixedServerUrl: String.fromEnvironment('DEEPTUTOR_FIXED_SERVER_URL'),
-      personalServerMode: bool.fromEnvironment(
-        'DEEPTUTOR_PERSONAL_SERVER_MODE',
-      ),
-      diagnosticsEnabled: bool.fromEnvironment('DEEPTUTOR_DIAGNOSTICS'),
+    const configuredServerUrl = String.fromEnvironment(
+      'DEEPTUTOR_FIXED_SERVER_URL',
+    );
+    const manualServerEntryEnabled = bool.fromEnvironment(
+      'DEEPTUTOR_ALLOW_SERVER_ENTRY',
+    );
+    return AppConnectionConfig(
+      fixedServerUrl: configuredServerUrl,
+      diagnosticsEnabled: const bool.fromEnvironment('DEEPTUTOR_DIAGNOSTICS'),
+      manualServerEntryEnabled: kDebugMode || manualServerEntryEnabled,
     );
   }
 
   final String fixedServerUrl;
-  final bool personalServerMode;
   final bool diagnosticsEnabled;
+  final bool manualServerEntryEnabled;
 
   bool get hasFixedServerUrl => fixedServerUrl.trim().isNotEmpty;
 

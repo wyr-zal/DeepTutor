@@ -168,6 +168,7 @@ export interface QuizFollowupController {
    * over the existing runner so the agent loop resumes without spawning a
    * new user bubble. Accepts either a flat ``text`` string (legacy
    * single-question) or a structured ``{text?, answers[]}`` (v2 path).
+   * Returns whether a live paused turn accepted the submission request.
    */
   submitAskUserReply(
     questionKey: string,
@@ -177,7 +178,7 @@ export interface QuizFollowupController {
           text?: string;
           answers?: Array<{ questionId: string; text: string }>;
         },
-  ): void;
+  ): boolean;
   /** Tab open helper — forwards to whoever registered an open handler. */
   openFollowupTab(context: QuizFollowupTabContext): void;
   /**
@@ -454,14 +455,14 @@ export function QuizFollowupProvider({ children }: ProviderProps) {
     ) => {
       const current = threadsRef.current[key];
       const turnId = current?.activeTurnId;
-      if (!current || !turnId) return;
+      if (!current || !turnId) return false;
       // Allow submission either while the turn is still streaming OR while
       // it's paused on an unresolved ask_user card (matches the main chat's
       // ``submitUserReply`` guard).
       const pendingAskUser = current.messages.some((m) =>
         hasPendingAskUser(m.events, turnId),
       );
-      if (!current.isStreaming && !pendingAskUser) return;
+      if (!current.isStreaming && !pendingAskUser) return false;
 
       const message: import("@/lib/unified-ws").SubmitUserReplyMessage = {
         type: "submit_user_reply",
@@ -477,12 +478,18 @@ export function QuizFollowupProvider({ children }: ProviderProps) {
       // shows the spinner while the resumed iteration runs. The runner is
       // already alive (ask_user pauses without disconnecting), so we just
       // forward the reply through it.
-      updateThread(key, (prev) => ({
-        ...prev,
-        isStreaming: true,
-        error: null,
-      }));
-      sendThroughRunner(key, message);
+      try {
+        updateThread(key, (prev) => ({
+          ...prev,
+          isStreaming: true,
+          error: null,
+        }));
+        sendThroughRunner(key, message);
+        return true;
+      } catch (error) {
+        console.error("Unable to submit quiz follow-up ask_user reply", error);
+        return false;
+      }
     },
     [sendThroughRunner, updateThread],
   );

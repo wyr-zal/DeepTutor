@@ -8,7 +8,7 @@ void main() {
   ) async {
     await tester.pumpWidget(
       MaterialApp(
-        theme: buildDeepTutorTheme(Brightness.light),
+        theme: buildDeepTutorTheme(AppThemeId.snow),
         home: const Scaffold(body: Text('DeepTutor')),
       ),
     );

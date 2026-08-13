@@ -61,6 +61,8 @@ export interface AskUserCardData {
   /** Present when the user has submitted; ``null`` while still pending. */
   answers: AskUserAnswer[] | null;
   resolved: boolean;
+  /** Increments when the server rejects a submitted answer for this card. */
+  submissionFailureCount: number;
 }
 
 /**
@@ -93,6 +95,7 @@ export function extractAskUserPayload(
     answers: AskUserAnswer[];
     text: string;
   } | null = null;
+  let submissionFailureCount = 0;
 
   for (const event of events) {
     const meta = (event.metadata ?? {}) as Record<string, unknown>;
@@ -109,6 +112,7 @@ export function extractAskUserPayload(
           (typeof meta.tool_call_id === "string" ? meta.tool_call_id : null),
       };
       resolution = null;
+      submissionFailureCount = 0;
       continue;
     }
     if (event.type === "progress" && meta.ask_user_resolved) {
@@ -134,6 +138,14 @@ export function extractAskUserPayload(
             ? (meta.reply_preview as string)
             : "",
       };
+      continue;
+    }
+    if (
+      event.type === "error" &&
+      meta.ask_user_submission_rejected &&
+      latest !== null
+    ) {
+      submissionFailureCount += 1;
     }
   }
 
@@ -157,10 +169,20 @@ export function extractAskUserPayload(
               },
             ]
           : [];
-    return { payload: latest.payload, answers, resolved: true };
+    return {
+      payload: latest.payload,
+      answers,
+      resolved: true,
+      submissionFailureCount,
+    };
   }
 
-  return { payload: latest.payload, answers: null, resolved: false };
+  return {
+    payload: latest.payload,
+    answers: null,
+    resolved: false,
+    submissionFailureCount,
+  };
 }
 
 /**
@@ -243,7 +265,12 @@ export function extractMessageSegments(
       const idx = segments.length;
       segments.push({
         kind: "ask_user",
-        data: { payload: normalised, answers: null, resolved: false },
+        data: {
+          payload: normalised,
+          answers: null,
+          resolved: false,
+          submissionFailureCount: 0,
+        },
         toolCallId,
         key: `a${seq++}`,
       });
@@ -304,8 +331,30 @@ export function extractMessageSegments(
           payload: target.data.payload,
           answers: finalAnswers,
           resolved: true,
+          submissionFailureCount: target.data.submissionFailureCount,
         },
       };
+      continue;
+    }
+    if (event.type === "error" && meta.ask_user_submission_rejected) {
+      for (let i = segments.length - 1; i >= 0; i--) {
+        const segment = segments[i];
+        if (
+          segment.kind !== "ask_user" ||
+          segment.data.resolved ||
+          (event.turn_id && segment.toolCallId === null)
+        ) {
+          continue;
+        }
+        segments[i] = {
+          ...segment,
+          data: {
+            ...segment.data,
+            submissionFailureCount: segment.data.submissionFailureCount + 1,
+          },
+        };
+        break;
+      }
     }
   }
 
@@ -418,7 +467,7 @@ export const AskUserOptions = memo(function AskUserOptions({
   onSubmit: (payload: {
     text?: string;
     answers?: Array<{ questionId: string; text: string }>;
-  }) => void;
+  }) => boolean;
   /** When true, the resolved Q&A card renders with an inline toggle so
    * the user can hide / show the question + answer summary. Resolved cards
    * default to collapsible+collapsed (the Q&A history stays addressable
@@ -438,7 +487,13 @@ export const AskUserOptions = memo(function AskUserOptions({
       />
     );
   }
-  return <InteractiveAskUserCard payload={data.payload} onSubmit={onSubmit} />;
+  return (
+    <InteractiveAskUserCard
+      payload={data.payload}
+      onSubmit={onSubmit}
+      submissionFailureCount={data.submissionFailureCount}
+    />
+  );
 });
 AskUserOptions.displayName = "AskUserOptions";
 
@@ -447,12 +502,14 @@ AskUserOptions.displayName = "AskUserOptions";
 const InteractiveAskUserCard = memo(function InteractiveAskUserCard({
   payload,
   onSubmit,
+  submissionFailureCount,
 }: {
   payload: AskUserPayload;
   onSubmit: (payload: {
     text?: string;
     answers?: Array<{ questionId: string; text: string }>;
-  }) => void;
+  }) => boolean;
+  submissionFailureCount: number;
 }) {
   const { t } = useTranslation();
   const totalQuestions = payload.questions.length;
@@ -471,6 +528,10 @@ const InteractiveAskUserCard = memo(function InteractiveAskUserCard({
   );
   const [activeIdx, setActiveIdx] = useState(0);
   const [submitted, setSubmitted] = useState(false);
+
+  useEffect(() => {
+    if (submissionFailureCount > 0) setSubmitted(false);
+  }, [submissionFailureCount]);
 
   const activeQuestion = payload.questions[activeIdx] ?? payload.questions[0];
 
@@ -516,7 +577,15 @@ const InteractiveAskUserCard = memo(function InteractiveAskUserCard({
       .map(({ text }) => text || "(skipped)")
       .filter((s) => s !== "(skipped)")
       .join(" | ");
-    onSubmit({ text: flat, answers: list });
+    try {
+      if (!onSubmit({ text: flat, answers: list })) {
+        setSubmitted(false);
+      }
+    } catch {
+      // Keep the selected answers visible and let the learner retry when the
+      // turn is no longer eligible or the transport rejects the submission.
+      setSubmitted(false);
+    }
   }, [submitted, payload.questions, answers, onSubmit]);
 
   const pickOption = useCallback(

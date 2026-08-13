@@ -8,6 +8,7 @@ class SessionSummary {
     required this.lastMessage,
     required this.createdAt,
     required this.updatedAt,
+    this.revision = 0,
   });
 
   final String id;
@@ -18,6 +19,7 @@ class SessionSummary {
   final String lastMessage;
   final DateTime? createdAt;
   final DateTime? updatedAt;
+  final int revision;
 
   factory SessionSummary.fromJson(Map<String, dynamic> json) {
     final id = (json['session_id'] ?? json['id'] ?? '').toString().trim();
@@ -41,6 +43,7 @@ class SessionSummary {
       lastMessage: (json['last_message'] ?? '').toString().trim(),
       createdAt: _parseTimestamp(json['created_at']),
       updatedAt: _parseTimestamp(json['updated_at']),
+      revision: _parseNonNegativeInt(json['revision']),
     );
   }
 
@@ -57,7 +60,13 @@ class SessionSummary {
           'created_at': createdAt!.toUtc().toIso8601String(),
         if (updatedAt != null)
           'updated_at': updatedAt!.toUtc().toIso8601String(),
+        'revision': revision,
       };
+
+  static int _parseNonNegativeInt(Object? value) {
+    final parsed = value is num ? value.toInt() : int.tryParse('$value') ?? 0;
+    return parsed < 0 ? 0 : parsed;
+  }
 
   static DateTime? _parseTimestamp(Object? value) {
     if (value == null) return null;

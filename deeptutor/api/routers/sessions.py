@@ -87,6 +87,26 @@ async def list_sessions(
     return {"sessions": sessions}
 
 
+@router.get("/sync")
+async def sync_sessions(
+    cursor: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=200),
+):
+    store = get_session_store()
+    sync = getattr(store, "sync_sessions", None)
+    if sync is None:
+        sessions = await store.list_sessions(limit=limit, offset=0)
+        return {
+            "cursor": cursor,
+            "sessions": sessions,
+            "deleted_session_ids": [],
+            "has_more": False,
+            "incremental": False,
+        }
+    result = await sync(cursor=cursor, limit=limit)
+    return {**result, "incremental": True}
+
+
 # Cap (in characters) for a single event payload returned to the UI. RAG
 # tools can attach whole KB documents to ``tool_result``/``observation``
 # events; the frontend TraceSurface only needs a preview, and the LLM context

@@ -15,7 +15,7 @@ void main() {
     );
 
     expect(find.text('继续努力，检查第二步。'), findsOneWidget);
-    expect(find.text('未从返回文字识别判定状态'), findsOneWidget);
+    expect(find.text('未识别'), findsOneWidget);
     expect(find.textContaining('✅'), findsNothing);
   });
 }

@@ -33,9 +33,6 @@ class AuthController extends AsyncNotifier<AuthSession?> {
       final storedBaseUrl = stored?.baseUrl ?? await _store.readBaseUrl();
       final baseUrl = fixedBaseUrl ?? storedBaseUrl;
       if (baseUrl == null || baseUrl.isEmpty) {
-        if (config.personalServerMode) {
-          throw const AuthApiException('单人固定服务器模式缺少服务器地址。');
-        }
         state = const AsyncData(null);
         return;
       }
@@ -46,20 +43,8 @@ class AuthController extends AsyncNotifier<AuthSession?> {
         stored = null;
       }
 
-      if (fixedBaseUrl != null && config.personalServerMode) {
-        final session = AuthSession.local(baseUrl: fixedBaseUrl);
-        await _store.saveSession(session);
-        state = AsyncData(session);
-        return;
-      }
-
       state = const AsyncLoading();
       final status = await _api.status(baseUrl);
-      if (status.enabled && config.personalServerMode) {
-        await _store.clearSession(keepBaseUrl: fixedBaseUrl != null);
-        throw const AuthApiException(
-            '固定服务器已启用身份认证，请先将服务端 auth.enabled 设置为 false。');
-      }
       if (!status.enabled) {
         final session = AuthSession.local(baseUrl: baseUrl, user: status.user);
         await _store.saveSession(session);
@@ -127,6 +112,38 @@ class AuthController extends AsyncNotifier<AuthSession?> {
     } catch (_) {
       // Login errors belong to the form. Restoring the signed-out state keeps
       // the page mounted so it can show the actionable 401/network message.
+      state = const AsyncData(null);
+      rethrow;
+    }
+  }
+
+  /// Connects to a user-entered development server and discovers whether
+  /// credentials are required. Authentication-disabled servers immediately
+  /// create a local session; authenticated servers leave the user signed out
+  /// so the login form can reveal its credential fields.
+  Future<AuthStatus> connectToServer({required String baseUrl}) async {
+    final normalizedBaseUrl = normalizeServerUrl(baseUrl);
+    final previousBaseUrl = await _store.readBaseUrl();
+    if (previousBaseUrl != null && previousBaseUrl != normalizedBaseUrl) {
+      await _store.clearSession(keepBaseUrl: false);
+    }
+    await _store.saveBaseUrl(normalizedBaseUrl);
+    state = const AsyncLoading();
+
+    try {
+      final status = await _api.status(normalizedBaseUrl);
+      if (!status.enabled) {
+        final session = AuthSession.local(
+          baseUrl: normalizedBaseUrl,
+          user: status.user,
+        );
+        await _store.saveSession(session);
+        state = AsyncData(session);
+      } else {
+        state = const AsyncData(null);
+      }
+      return status;
+    } catch (_) {
       state = const AsyncData(null);
       rethrow;
     }
